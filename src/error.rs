@@ -31,6 +31,9 @@ pub enum StreamError {
     /// The input token account is empty.
     #[error("Input token account empty")]
     EmptySupply,
+    /// The input token account is empty.
+    #[error("Input token account does not have enough tokens")]
+    InsufficientFunds,
     /// The pool token mint has a non-zero supply.
     #[error("Pool token mint has a non-zero supply")]
     InvalidSupply,

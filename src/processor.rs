@@ -261,7 +261,7 @@ impl Processor {
         }
 
         //TODO: Check this
-        let initial_amount = 1u128;
+        let initial_amount = 1000u128;
 
         Self::token_mint_to(
             swap_info.key,
@@ -290,7 +290,6 @@ impl Processor {
     pub fn process_deposit_token(
         program_id: &Pubkey,
         pool_tokenmount: u64,
-        maximum_token_amount: u64,
         accounts: &[AccountInfo],
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
@@ -328,15 +327,15 @@ impl Processor {
             (to_u128(token.amount)?,current_stream_token_mint_supply)
         };
 
+        let pool_tokenmount = to_u64(pool_tokenmount)?;
         let token_amount = token.amount;
-        if token_amount > maximum_token_amount {
-            return Err(StreamError::ExceededSlippage.into());
+        if token_amount < pool_tokenmount {
+            return Err(StreamError::InsufficientFunds.into());
         }
         if token_amount == 0 {
             return Err(StreamError::ZeroTradingTokens.into());
         }
 
-        let pool_tokenmount = to_u64(pool_tokenmount)?;
 
         Self::token_transfer(
             swap_info.key,
@@ -345,7 +344,7 @@ impl Processor {
             token_info.clone(),
             user_transfer_authority_info.clone(),
             token_swap.nonce(),
-            token_amount,
+            pool_tokenmount,
         )?;
 
         Self::token_mint_to(
@@ -365,7 +364,6 @@ impl Processor {
     pub fn process_withdraw_token(
         program_id: &Pubkey,
         pool_tokenmount: u64,
-        minimum_token_amount: u64,
         accounts: &[AccountInfo],
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
@@ -411,15 +409,12 @@ impl Processor {
             .ok_or(StreamError::CalculationFailure)?;
 
         let token_amount = token.amount;
-        let token_amount = std::cmp::min(token.amount, token_amount);
-        if token_amount < minimum_token_amount {
-            return Err(StreamError::ExceededSlippage.into());
-        }
+
         if token_amount == 0 && token.amount != 0 {
             return Err(StreamError::ZeroTradingTokens.into());
         }
     
-
+        let pool_tokenmount = to_u64(pool_tokenmount)?;
         if withdraw_fee > 0 {
             Self::token_transfer(
                 swap_info.key,
@@ -438,7 +433,7 @@ impl Processor {
             stream_token_mint_info.clone(),
             user_transfer_authority_info.clone(),
             token_swap.nonce(),
-            to_u64(pool_tokenmount)?,
+            pool_tokenmount,
         )?;
 
         if token_amount > 0 {
@@ -449,7 +444,7 @@ impl Processor {
                 dest_token_info.clone(),
                 authority_info.clone(),
                 token_swap.nonce(),
-                token_amount,
+                pool_tokenmount,
             )?;
         }
 
@@ -483,25 +478,21 @@ impl Processor {
             }
             SwapInstruction::DepositToken(DepositToken {
                 pool_tokenmount,
-                maximum_token_amount,
             }) => {
                 msg!("Instruction: DepositToken");
                 Self::process_deposit_token(
                     program_id,
                     pool_tokenmount,
-                    maximum_token_amount,
                     accounts,
                 )
             }
             SwapInstruction::WithdrawToken(WithdrawToken {
                 pool_tokenmount,
-                minimum_token_amount,
             }) => {
                 msg!("Instruction: WithdrawToken");
                 Self::process_withdraw_token(
                     program_id,
                     pool_tokenmount,
-                    minimum_token_amount,
                     accounts,
                 )
             }
@@ -571,6 +562,9 @@ impl PrintProgramError for StreamError {
             StreamError::InvalidCurve => {
                 msg!("Error: The provided curve parameters are invalid")
             }
+            StreamError::InsufficientFunds => {
+                msg!("Error: The balance of input tokens is not enough")
+            }
             StreamError::UnsupportedCurveOperation => {
                 msg!("Error: The operation cannot be performed on the given curve")
             }
@@ -591,8 +585,8 @@ mod tests {
     use super::*;
     use crate::{
         instruction::{
-            deposit_all_token_types, initialize,
-            withdraw_all_token_types,
+            deposit_token, initialize,
+            withdraw_token,
         },
     };
     use solana_program::{instruction::Instruction, program_stubs, rent::Rent};
@@ -806,7 +800,7 @@ mod tests {
 
 
         #[allow(clippy::too_many_arguments)]
-        pub fn deposit_all_token_types(
+        pub fn deposit_token(
             &mut self,
             depositor_key: &Pubkey,
             depositor_token_key: &Pubkey,
@@ -814,7 +808,6 @@ mod tests {
             depositor_pool_key: &Pubkey,
             mut depositor_pool_account: &mut Account,
             pool_tokenmount: u64,
-            maximum_token_amount: u64,
         ) -> ProgramResult {
             let user_transfer_authority = Pubkey::new_unique();
             do_process_instruction(
@@ -824,7 +817,7 @@ mod tests {
                     &user_transfer_authority,
                     depositor_key,
                     &[],
-                    maximum_token_amount,
+                    pool_tokenmount,
                 )
                 .unwrap(),
                 vec![
@@ -836,7 +829,7 @@ mod tests {
             .unwrap();
 
             do_process_instruction(
-                deposit_all_token_types(
+                deposit_token(
                     &SWAP_PROGRAM_ID,
                     &spl_token::id(),
                     &self.swap_key,
@@ -848,7 +841,6 @@ mod tests {
                     depositor_pool_key,
                     DepositToken {
                         pool_tokenmount,
-                        maximum_token_amount,
                     },
                 )
                 .unwrap(),
@@ -866,7 +858,7 @@ mod tests {
         }
 
         #[allow(clippy::too_many_arguments)]
-        pub fn withdraw_all_token_types(
+        pub fn withdraw_token(
             &mut self,
             user_key: &Pubkey,
             pool_key: &Pubkey,
@@ -874,7 +866,6 @@ mod tests {
             token_key: &Pubkey,
             mut token_account: &mut Account,
             pool_tokenmount: u64,
-            minimum_token_amount: u64,
         ) -> ProgramResult {
             let user_transfer_authority_key = Pubkey::new_unique();
             // approve user transfer authority to take out pool tokens
@@ -898,7 +889,7 @@ mod tests {
 
             // withdraw token a and b correctly
             do_process_instruction(
-                withdraw_all_token_types(
+                withdraw_token(
                     &SWAP_PROGRAM_ID,
                     &spl_token::id(),
                     &self.swap_key,
@@ -911,7 +902,6 @@ mod tests {
                     token_key,
                     WithdrawToken {
                         pool_tokenmount,
-                        minimum_token_amount,
                     },
                 )
                 .unwrap(),
@@ -1470,76 +1460,43 @@ mod tests {
         assert_eq!(stream_token_mint.supply, pool_account.amount);
     }
 
-    // #[test]
-    // fn test_deposit() {
-    //     let user_key = Pubkey::new_unique();
-    //     let depositor_key = Pubkey::new_unique();
-    //     let trade_fee_numerator = 1;
-    //     let trade_fee_denominator = 2;
-    //     let owner_trade_fee_numerator = 1;
-    //     let owner_trade_fee_denominator = 10;
-    //     let owner_withdraw_fee_numerator = 1;
-    //     let owner_withdraw_fee_denominator = 5;
-    //     let host_fee_numerator = 20;
-    //     let host_fee_denominator = 100;
+    #[test]
+    fn test_deposit() {
+        let user_key = Pubkey::new_unique();
+        let depositor_key = Pubkey::new_unique();
 
-    //     let fees = Fees {
-    //         trade_fee_numerator,
-    //         trade_fee_denominator,
-    //         owner_trade_fee_numerator,
-    //         owner_trade_fee_denominator,
-    //         owner_withdraw_fee_numerator,
-    //         owner_withdraw_fee_denominator,
-    //         host_fee_numerator,
-    //         host_fee_denominator,
-    //     };
+        let token_amount = 1000;
 
-    //     let token_amount = 1000;
-    //     let token_b_amount = 9000;
-    //     let curve_type = CurveType::ConstantProduct;
-    //     let swap_curve = SwapCurve {
-    //         curve_type,
-    //         calculator: Box::new(ConstantProductCurve {}),
-    //     };
+        let mut accounts =
+            SwapAccountInfo::new(&user_key, token_amount);
 
-    //     let mut accounts =
-    //         SwapAccountInfo::new(&user_key, fees, swap_curve, token_amount, token_b_amount);
+        // depositing 10% of the current pool amount in token A and B means
+        // that our pool tokens will be worth 1 / 10 of the current pool amount
+        let pool_amount = token_amount;
 
-    //     // depositing 10% of the current pool amount in token A and B means
-    //     // that our pool tokens will be worth 1 / 10 of the current pool amount
-    //     let pool_amount = INITIAL_SWAP_POOL_AMOUNT / 10;
-    //     let deposit_a = token_amount / 10;
-    //     let deposit_b = token_b_amount / 10;
+        // swap not initialized
+        {
+            let (
+                token_key,
+                mut token_account,
+                pool_key,
+                mut pool_account,
+            ) = accounts.setup_tokenccounts(&user_key, &depositor_key, pool_amount, 0);
+            assert_eq!(
+                Err(ProgramError::UninitializedAccount),
+                accounts.deposit_token(
+                    &depositor_key,
+                    &token_key,
+                    &mut token_account,
+                    &pool_key,
+                    &mut pool_account,
+                    pool_amount.try_into().unwrap(),
+                )
+            );
+        }
 
-    //     // swap not initialized
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         assert_eq!(
-    //             Err(ProgramError::UninitializedAccount),
-    //             accounts.deposit_all_token_types(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-    //     }
-
-    //     accounts.initialize_swap().unwrap();
-
+        accounts.initialize_swap().unwrap();
+    
     //     // wrong owner for swap account
     //     {
     //         let (
@@ -1556,7 +1513,7 @@ mod tests {
     //         accounts.swap_account = wrong_swap_account;
     //         assert_eq!(
     //             Err(ProgramError::IncorrectProgramId),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1590,7 +1547,7 @@ mod tests {
     //         accounts.authority_key = bad_authority_key;
     //         assert_eq!(
     //             Err(StreamError::InvalidProgramAddress.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1624,7 +1581,7 @@ mod tests {
     //         );
     //         assert_eq!(
     //             Err(TokenError::InsufficientFunds.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1657,7 +1614,7 @@ mod tests {
     //         );
     //         assert_eq!(
     //             Err(TokenError::InsufficientFunds.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1684,7 +1641,7 @@ mod tests {
     //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
     //         assert_eq!(
     //             Err(TokenError::MintMismatch.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_b_key,
     //                 &mut token_b_account,
@@ -1719,7 +1676,7 @@ mod tests {
     //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
     //         assert_eq!(
     //             Err(TokenError::MintMismatch.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1748,7 +1705,7 @@ mod tests {
     //         assert_eq!(
     //             Err(TokenError::OwnerMismatch.into()),
     //             do_process_instruction(
-    //                 deposit_all_token_types(
+    //                 deposit_token(
     //                     &SWAP_PROGRAM_ID,
     //                     &spl_token::id(),
     //                     &accounts.swap_key,
@@ -1797,7 +1754,7 @@ mod tests {
     //         assert_eq!(
     //             Err(StreamError::IncorrectTokenProgramId.into()),
     //             do_process_instruction(
-    //                 deposit_all_token_types(
+    //                 deposit_token(
     //                     &SWAP_PROGRAM_ID,
     //                     &wrong_key,
     //                     &accounts.swap_key,
@@ -1852,7 +1809,7 @@ mod tests {
     //         // wrong swap token a account
     //         assert_eq!(
     //             Err(StreamError::IncorrectSwapAccount.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1878,7 +1835,7 @@ mod tests {
     //         // wrong swap token b account
     //         assert_eq!(
     //             Err(StreamError::IncorrectSwapAccount.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1915,7 +1872,7 @@ mod tests {
 
     //         assert_eq!(
     //             Err(StreamError::IncorrectPoolMint.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1945,7 +1902,7 @@ mod tests {
     //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
     //         assert_eq!(
     //             Err(StreamError::ZeroTradingTokens.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1973,7 +1930,7 @@ mod tests {
     //         // maximum A amount in too low
     //         assert_eq!(
     //             Err(StreamError::ExceededSlippage.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -1989,7 +1946,7 @@ mod tests {
     //         // maximum B amount in too low
     //         assert_eq!(
     //             Err(StreamError::ExceededSlippage.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &depositor_key,
     //                 &token_key,
     //                 &mut token_account,
@@ -2021,7 +1978,7 @@ mod tests {
     //         let authority_key = accounts.authority_key;
     //         assert_eq!(
     //             Err(StreamError::InvalidInput.into()),
-    //             accounts.deposit_all_token_types(
+    //             accounts.deposit_token(
     //                 &authority_key,
     //                 &swap_token_key,
     //                 &mut swap_token_account,
@@ -2036,124 +1993,81 @@ mod tests {
     //         );
     //     }
 
-    //     // correctly deposit
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         accounts
-    //             .deposit_all_token_types(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //             .unwrap();
+        // correctly deposit
+        {
+            let (
+                token_key,
+                mut token_account,
+                pool_key,
+                mut pool_account,
+            ) = accounts.setup_tokenccounts(&user_key, &depositor_key, pool_amount, 0);
+            accounts
+                .deposit_token(
+                    &depositor_key,
+                    &token_key,
+                    &mut token_account,
+                    &pool_key,
+                    &mut pool_account,
+                    pool_amount.try_into().unwrap(),
+                )
+                .unwrap();
 
-    //         let swap_token =
-    //             spl_token::state::Account::unpack(&accounts.token_account.data).unwrap();
-    //         assert_eq!(swap_token.amount, deposit_a + token_amount);
-    //         let swap_token_b =
-    //             spl_token::state::Account::unpack(&accounts.token_b_account.data).unwrap();
-    //         assert_eq!(swap_token_b.amount, deposit_b + token_b_amount);
-    //         let token = spl_token::state::Account::unpack(&token_account.data).unwrap();
-    //         assert_eq!(token.amount, 0);
-    //         let token_b = spl_token::state::Account::unpack(&token_b_account.data).unwrap();
-    //         assert_eq!(token_b.amount, 0);
-    //         let pool_account = spl_token::state::Account::unpack(&pool_account.data).unwrap();
-    //         let swap_pool_account =
-    //             spl_token::state::Account::unpack(&accounts.pool_tokenccount.data).unwrap();
-    //         let stream_token_mint =
-    //             spl_token::state::Mint::unpack(&accounts.stream_token_mint_account.data).unwrap();
-    //         assert_eq!(
-    //             stream_token_mint.supply,
-    //             pool_account.amount + swap_pool_account.amount
-    //         );
-    //     }
-    // }
+            let swap_token =
+                spl_token::state::Account::unpack(&accounts.token_account.data).unwrap();
+            assert_eq!(swap_token.amount, pool_amount + token_amount);
 
-    // #[test]
-    // fn test_withdraw() {
-    //     let user_key = Pubkey::new_unique();
-    //     let trade_fee_numerator = 1;
-    //     let trade_fee_denominator = 2;
-    //     let owner_trade_fee_numerator = 1;
-    //     let owner_trade_fee_denominator = 10;
-    //     let owner_withdraw_fee_numerator = 1;
-    //     let owner_withdraw_fee_denominator = 5;
-    //     let host_fee_numerator = 7;
-    //     let host_fee_denominator = 100;
+            let token = spl_token::state::Account::unpack(&token_account.data).unwrap();
+            assert_eq!(token.amount, 0);
+            let pool_account = spl_token::state::Account::unpack(&pool_account.data).unwrap();
+            let swap_pool_account =
+                spl_token::state::Account::unpack(&accounts.pool_tokenccount.data).unwrap();
+            let stream_token_mint =
+                spl_token::state::Mint::unpack(&accounts.stream_token_mint_account.data).unwrap();
+            assert_eq!(
+                stream_token_mint.supply,
+                pool_account.amount + swap_pool_account.amount
+            );
+        }
+    }
 
-    //     let fees = Fees {
-    //         trade_fee_numerator,
-    //         trade_fee_denominator,
-    //         owner_trade_fee_numerator,
-    //         owner_trade_fee_denominator,
-    //         owner_withdraw_fee_numerator,
-    //         owner_withdraw_fee_denominator,
-    //         host_fee_numerator,
-    //         host_fee_denominator,
-    //     };
 
-    //     let token_amount = 1000;
-    //     let token_b_amount = 2000;
-    //     let curve_type = CurveType::ConstantProduct;
-    //     let swap_curve = SwapCurve {
-    //         curve_type,
-    //         calculator: Box::new(ConstantProductCurve {}),
-    //     };
+    #[test]
+    fn test_withdraw() {
+        let user_key = Pubkey::new_unique();
 
-    //     let withdrawer_key = Pubkey::new_unique();
-    //     let initial_a = token_amount / 10;
-    //     let initial_b = token_b_amount / 10;
-    //     let initial_pool = swap_curve.calculator.new_pool_supply() / 10;
-    //     let withdraw_amount = initial_pool / 4;
-    //     let minimum_token_amount = initial_a / 40;
-    //     let minimum_token_b_amount = initial_b / 40;
+        let withdrawer_key = Pubkey::new_unique();
+        let initial_a = 100;
+        let initial_pool =  1000;
+        let withdraw_amount = 50;
 
-    //     let mut accounts =
-    //         SwapAccountInfo::new(&user_key, fees, swap_curve, token_amount, token_b_amount);
 
-    //     // swap not initialized
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &withdrawer_key, initial_a, initial_b, 0);
-    //         assert_eq!(
-    //             Err(ProgramError::UninitializedAccount),
-    //             accounts.withdraw_all_token_types(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-    //     }
 
-    //     accounts.initialize_swap().unwrap();
+        let mut accounts =
+            SwapAccountInfo::new(&user_key, initial_a);
 
+        // swap not initialized
+        {
+            let (
+                token_key,
+                mut token_account,
+                pool_key,
+                mut pool_account,
+            ) = accounts.setup_tokenccounts(&user_key, &withdrawer_key, withdraw_amount, 0);
+            assert_eq!(
+                Err(ProgramError::UninitializedAccount),
+                accounts.withdraw_token(
+                    &withdrawer_key,
+                    &pool_key,
+                    &mut pool_account,
+                    &token_key,
+                    &mut token_account,
+                    withdraw_amount.try_into().unwrap(),
+                )
+            );
+        }
+
+        accounts.initialize_swap().unwrap();
+    
     //     // wrong owner for swap account
     //     {
     //         let (
@@ -2170,7 +2084,7 @@ mod tests {
     //         accounts.swap_account = wrong_swap_account;
     //         assert_eq!(
     //             Err(ProgramError::IncorrectProgramId),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2204,7 +2118,7 @@ mod tests {
     //         accounts.authority_key = bad_authority_key;
     //         assert_eq!(
     //             Err(StreamError::InvalidProgramAddress.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2238,7 +2152,7 @@ mod tests {
     //         );
     //         assert_eq!(
     //             Err(TokenError::InsufficientFunds.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2271,7 +2185,7 @@ mod tests {
     //         );
     //         assert_eq!(
     //             Err(TokenError::MintMismatch.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2318,7 +2232,7 @@ mod tests {
     //         );
     //         assert_eq!(
     //             Err(TokenError::MintMismatch.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &wrong_token_key,
     //                 &mut wrong_token_account,
@@ -2369,7 +2283,7 @@ mod tests {
     //         accounts.pool_fee_key = wrong_pool_key;
     //         assert_eq!(
     //             Err(StreamError::IncorrectFeeAccount.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2406,7 +2320,7 @@ mod tests {
     //         assert_eq!(
     //             Err(TokenError::OwnerMismatch.into()),
     //             do_process_instruction(
-    //                 withdraw_all_token_types(
+    //                 withdraw_token(
     //                     &SWAP_PROGRAM_ID,
     //                     &spl_token::id(),
     //                     &accounts.swap_key,
@@ -2463,7 +2377,7 @@ mod tests {
     //         assert_eq!(
     //             Err(StreamError::IncorrectTokenProgramId.into()),
     //             do_process_instruction(
-    //                 withdraw_all_token_types(
+    //                 withdraw_token(
     //                     &SWAP_PROGRAM_ID,
     //                     &wrong_key,
     //                     &accounts.swap_key,
@@ -2526,7 +2440,7 @@ mod tests {
     //         // wrong swap token a account
     //         assert_eq!(
     //             Err(StreamError::IncorrectSwapAccount.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2552,7 +2466,7 @@ mod tests {
     //         // wrong swap token b account
     //         assert_eq!(
     //             Err(StreamError::IncorrectSwapAccount.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2595,7 +2509,7 @@ mod tests {
 
     //         assert_eq!(
     //             Err(StreamError::IncorrectPoolMint.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2631,7 +2545,7 @@ mod tests {
     //         );
     //         assert_eq!(
     //             Err(StreamError::ZeroTradingTokens.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2665,7 +2579,7 @@ mod tests {
     //         // minimum A amount out too high
     //         assert_eq!(
     //             Err(StreamError::ExceededSlippage.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2681,7 +2595,7 @@ mod tests {
     //         // minimum B amount out too high
     //         assert_eq!(
     //             Err(StreamError::ExceededSlippage.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2716,7 +2630,7 @@ mod tests {
     //         let mut swap_token_account = accounts.get_tokenccount(&swap_token_key).clone();
     //         assert_eq!(
     //             Err(StreamError::InvalidInput.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2733,7 +2647,7 @@ mod tests {
     //         let mut swap_token_b_account = accounts.get_tokenccount(&swap_token_b_key).clone();
     //         assert_eq!(
     //             Err(StreamError::InvalidInput.into()),
-    //             accounts.withdraw_all_token_types(
+    //             accounts.withdraw_token(
     //                 &withdrawer_key,
     //                 &pool_key,
     //                 &mut pool_account,
@@ -2748,97 +2662,63 @@ mod tests {
     //         );
     //     }
 
-    //     // correct withdrawal
+        // correct withdrawal
+        {
+            let (
+                token_key,
+                mut token_account,
+                pool_key,
+                mut pool_account,
+            ) = accounts.setup_tokenccounts(
+                &user_key,
+                &withdrawer_key,
+                initial_a,
+                initial_pool.try_into().unwrap(),
+            );
+
+            accounts
+                .withdraw_token(
+                    &withdrawer_key,
+                    &pool_key,
+                    &mut pool_account,
+                    &token_key,
+                    &mut token_account,
+                    withdraw_amount.try_into().unwrap(),
+                )
+                .unwrap();
+
+            let token =
+                spl_token::state::Account::unpack(&accounts.token_account.data).unwrap();
+
+            let stream_token_mint =
+                spl_token::state::Mint::unpack(&accounts.stream_token_mint_account.data).unwrap();
+
+            assert_eq!(
+                token.amount,
+                withdraw_amount
+            );
+
+            let token = spl_token::state::Account::unpack(&token_account.data).unwrap();
+            assert_eq!(
+                token.amount,
+                initial_a + withdraw_amount
+            );
+
+            let pool_account = spl_token::state::Account::unpack(&pool_account.data).unwrap();
+            assert_eq!(
+                pool_account.amount,
+                initial_pool - withdraw_amount
+            );
+        }
+    }
+        // correct withdrawal from fee account
     //     {
     //         let (
     //             token_key,
     //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             initial_pool.try_into().unwrap(),
-    //         );
-
-    //         accounts
-    //             .withdraw_all_token_types(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //             .unwrap();
-
-    //         let swap_token =
-    //             spl_token::state::Account::unpack(&accounts.token_account.data).unwrap();
-    //         let swap_token_b =
-    //             spl_token::state::Account::unpack(&accounts.token_b_account.data).unwrap();
-    //         let stream_token_mint =
-    //             spl_token::state::Mint::unpack(&accounts.stream_token_mint_account.data).unwrap();
-    //         let withdraw_fee = accounts.fees.owner_withdraw_fee(withdraw_amount).unwrap();
-    //         let results = accounts
-    //             .swap_curve
-    //             .calculator
-    //             .pool_tokens_to_trading_tokens(
-    //                 withdraw_amount - withdraw_fee,
-    //                 stream_token_mint.supply.try_into().unwrap(),
-    //                 swap_token.amount.try_into().unwrap(),
-    //                 swap_token_b.amount.try_into().unwrap(),
-    //                 RoundDirection::Floor,
-    //             )
-    //             .unwrap();
-    //         assert_eq!(
-    //             swap_token.amount,
-    //             token_amount - to_u64(results.token_amount).unwrap()
-    //         );
-    //         assert_eq!(
-    //             swap_token_b.amount,
-    //             token_b_amount - to_u64(results.token_b_amount).unwrap()
-    //         );
-    //         let token = spl_token::state::Account::unpack(&token_account.data).unwrap();
-    //         assert_eq!(
-    //             token.amount,
-    //             initial_a + to_u64(results.token_amount).unwrap()
-    //         );
-    //         let token_b = spl_token::state::Account::unpack(&token_b_account.data).unwrap();
-    //         assert_eq!(
-    //             token_b.amount,
-    //             initial_b + to_u64(results.token_b_amount).unwrap()
-    //         );
-    //         let pool_account = spl_token::state::Account::unpack(&pool_account.data).unwrap();
-    //         assert_eq!(
-    //             pool_account.amount,
-    //             to_u64(initial_pool - withdraw_amount).unwrap()
-    //         );
-    //         let fee_account =
-    //             spl_token::state::Account::unpack(&accounts.stream_fee_account.data).unwrap();
-    //         assert_eq!(
-    //             fee_account.amount,
-    //             TryInto::<u64>::try_into(withdraw_fee).unwrap()
-    //         );
-    //     }
-
-    //     // correct withdrawal from fee account
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
     //             _pool_key,
     //             mut _pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &withdrawer_key, 0, 0, 0);
+    //         ) = accounts.setup_tokenccounts(&user_key, &withdrawer_key, 0, token_amount);
 
     //         let pool_fee_key = accounts.pool_fee_key;
     //         let mut stream_fee_account = accounts.stream_fee_account.clone();
@@ -2846,46 +2726,25 @@ mod tests {
     //         let pool_fee_amount = fee_account.amount;
 
     //         accounts
-    //             .withdraw_all_token_types(
+    //             .withdraw_token(
     //                 &user_key,
     //                 &pool_fee_key,
     //                 &mut stream_fee_account,
     //                 &token_key,
     //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 pool_fee_amount,
-    //                 0,
-    //                 0,
+    //                 token_amount,
     //             )
     //             .unwrap();
 
     //         let swap_token =
     //             spl_token::state::Account::unpack(&accounts.token_account.data).unwrap();
-    //         let swap_token_b =
-    //             spl_token::state::Account::unpack(&accounts.token_b_account.data).unwrap();
     //         let stream_token_mint =
     //             spl_token::state::Mint::unpack(&accounts.stream_token_mint_account.data).unwrap();
-    //         let results = accounts
-    //             .swap_curve
-    //             .calculator
-    //             .pool_tokens_to_trading_tokens(
-    //                 pool_fee_amount.try_into().unwrap(),
-    //                 stream_token_mint.supply.try_into().unwrap(),
-    //                 swap_token.amount.try_into().unwrap(),
-    //                 swap_token_b.amount.try_into().unwrap(),
-    //                 RoundDirection::Floor,
-    //             )
-    //             .unwrap();
+
     //         let token = spl_token::state::Account::unpack(&token_account.data).unwrap();
     //         assert_eq!(
     //             token.amount,
-    //             TryInto::<u64>::try_into(results.token_amount).unwrap()
-    //         );
-    //         let token_b = spl_token::state::Account::unpack(&token_b_account.data).unwrap();
-    //         assert_eq!(
-    //             token_b.amount,
-    //             TryInto::<u64>::try_into(results.token_b_amount).unwrap()
+    //             TryInto::<u64>::try_into(token_amount).unwrap()
     //         );
     //     }
     // }

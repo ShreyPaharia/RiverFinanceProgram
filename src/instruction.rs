@@ -31,8 +31,6 @@ pub struct DepositToken {
     /// Pool token amount to transfer. token and token_b amount are set by
     /// the current exchange rate and size of the pool
     pub pool_tokenmount: u64,
-    /// Maximum token A amount to deposit, prevents excessive slippage
-    pub maximum_token_amount: u64,
 }
 
 /// WithdrawToken instruction data
@@ -43,8 +41,6 @@ pub struct WithdrawToken {
     /// Amount of pool tokens to burn. User receives an output of token a
     /// and b based on the percentage of the pool tokens that are returned.
     pub pool_tokenmount: u64,
-    /// Minimum amount of token A to receive, prevents excessive slippage
-    pub minimum_token_amount: u64,
 }
 
 /// Instructions supported by the token swap program.
@@ -110,20 +106,16 @@ impl SwapInstruction {
                     nonce
                 })
             }
-            2 => {
+            1 => {
                 let (pool_tokenmount, rest) = Self::unpack_u64(rest)?;
-                let (maximum_token_amount, rest) = Self::unpack_u64(rest)?;
                 Self::DepositToken(DepositToken {
-                    pool_tokenmount,
-                    maximum_token_amount,
+                    pool_tokenmount
                 })
             }
-            3 => {
+            2 => {
                 let (pool_tokenmount, rest) = Self::unpack_u64(rest)?;
-                let (minimum_token_amount, rest) = Self::unpack_u64(rest)?;
                 Self::WithdrawToken(WithdrawToken {
                     pool_tokenmount,
-                    minimum_token_amount,
                 })
             }
             _ => return Err(StreamError::InvalidInstruction.into()),
@@ -156,19 +148,15 @@ impl SwapInstruction {
             }
             Self::DepositToken(DepositToken {
                 pool_tokenmount,
-                maximum_token_amount,
             }) => {
-                buf.push(2);
+                buf.push(1);
                 buf.extend_from_slice(&pool_tokenmount.to_le_bytes());
-                buf.extend_from_slice(&maximum_token_amount.to_le_bytes());
             }
             Self::WithdrawToken(WithdrawToken {
                 pool_tokenmount,
-                minimum_token_amount,
             }) => {
-                buf.push(3);
+                buf.push(2);
                 buf.extend_from_slice(&pool_tokenmount.to_le_bytes());
-                buf.extend_from_slice(&minimum_token_amount.to_le_bytes());
             }
         }
         buf
@@ -209,8 +197,8 @@ pub fn initialize(
     })
 }
 
-/// Creates a 'deposit_all_token_types' instruction.
-pub fn deposit_all_token_types(
+/// Creates a 'deposit_token' instruction.
+pub fn deposit_token(
     program_id: &Pubkey,
     token_program_id: &Pubkey,
     swap_pubkey: &Pubkey,
@@ -242,8 +230,8 @@ pub fn deposit_all_token_types(
     })
 }
 
-/// Creates a 'withdraw_all_token_types' instruction.
-pub fn withdraw_all_token_types(
+/// Creates a 'withdraw_token' instruction.
+pub fn withdraw_token(
     program_id: &Pubkey,
     token_program_id: &Pubkey,
     swap_pubkey: &Pubkey,
@@ -299,15 +287,12 @@ mod tests {
     #[test]
     fn pack_deposit() {
         let pool_tokenmount: u64 = 5;
-        let maximum_token_amount: u64 = 10;
         let check = SwapInstruction::DepositToken(DepositToken {
             pool_tokenmount,
-            maximum_token_amount,
         });
         let packed = check.pack();
-        let mut expect = vec![2];
+        let mut expect = vec![1];
         expect.extend_from_slice(&pool_tokenmount.to_le_bytes());
-        expect.extend_from_slice(&maximum_token_amount.to_le_bytes());
         assert_eq!(packed, expect);
         let unpacked = SwapInstruction::unpack(&expect).unwrap();
         assert_eq!(unpacked, check);
@@ -319,12 +304,10 @@ mod tests {
         let minimum_token_amount: u64 = 102198761982612;
         let check = SwapInstruction::WithdrawToken(WithdrawToken {
             pool_tokenmount,
-            minimum_token_amount,
         });
         let packed = check.pack();
-        let mut expect = vec![3];
+        let mut expect = vec![2];
         expect.extend_from_slice(&pool_tokenmount.to_le_bytes());
-        expect.extend_from_slice(&minimum_token_amount.to_le_bytes());
         assert_eq!(packed, expect);
         let unpacked = SwapInstruction::unpack(&expect).unwrap();
         assert_eq!(unpacked, check);
