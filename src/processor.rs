@@ -6,6 +6,7 @@ use crate::{
     instruction::{
         DepositToken, Initialize,
         SwapInstruction, WithdrawToken,
+        StartStream,
     },
     state::{StreamState, StreamV1, StreamVersion},
 };
@@ -289,7 +290,7 @@ impl Processor {
     /// Processes an [DepositToken](enum.Instruction.html).
     pub fn process_deposit_token(
         program_id: &Pubkey,
-        pool_tokenmount: u64,
+        tokenamount: u64,
         accounts: &[AccountInfo],
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
@@ -319,17 +320,17 @@ impl Processor {
         let token = Self::unpack_tokenccount(token_info, token_swap.token_program_id())?;
         let stream_token_mint = Self::unpack_mint(stream_token_mint_info, token_swap.token_program_id())?;
         let current_stream_token_mint_supply = to_u128(stream_token_mint.supply)?;
-        let (pool_tokenmount, stream_token_mint_supply) = if current_stream_token_mint_supply > 0 {
-            (to_u128(pool_tokenmount)?, current_stream_token_mint_supply)
+        let (tokenamount, stream_token_mint_supply) = if current_stream_token_mint_supply > 0 {
+            (to_u128(tokenamount)?, current_stream_token_mint_supply)
         } else {
             // TODO:Check this
             // (calculator.new_pool_supply(), calculator.new_pool_supply())
             (to_u128(token.amount)?,current_stream_token_mint_supply)
         };
 
-        let pool_tokenmount = to_u64(pool_tokenmount)?;
+        let tokenamount = to_u64(tokenamount)?;
         let token_amount = token.amount;
-        if token_amount < pool_tokenmount {
+        if token_amount < tokenamount {
             return Err(StreamError::InsufficientFunds.into());
         }
         if token_amount == 0 {
@@ -344,7 +345,7 @@ impl Processor {
             token_info.clone(),
             user_transfer_authority_info.clone(),
             token_swap.nonce(),
-            pool_tokenmount,
+            tokenamount,
         )?;
 
         Self::token_mint_to(
@@ -354,7 +355,7 @@ impl Processor {
             dest_info.clone(),
             authority_info.clone(),
             token_swap.nonce(),
-            pool_tokenmount,
+            tokenamount,
         )?;
 
         Ok(())
@@ -363,7 +364,7 @@ impl Processor {
     /// Processes an [WithdrawToken](enum.Instruction.html).
     pub fn process_withdraw_token(
         program_id: &Pubkey,
-        pool_tokenmount: u64,
+        tokenamount: u64,
         accounts: &[AccountInfo],
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
@@ -401,10 +402,10 @@ impl Processor {
             0
             // token_swap
             //     .fees()
-            //     .owner_withdraw_fee(to_u128(pool_tokenmount)?)
+            //     .owner_withdraw_fee(to_u128(tokenamount)?)
             //     .ok_or(StreamError::FeeCalculationFailure)?
         };
-        let pool_tokenmount = to_u128(pool_tokenmount)?
+        let tokenamount = to_u128(tokenamount)?
             .checked_sub(withdraw_fee)
             .ok_or(StreamError::CalculationFailure)?;
 
@@ -414,7 +415,7 @@ impl Processor {
             return Err(StreamError::ZeroTradingTokens.into());
         }
     
-        let pool_tokenmount = to_u64(pool_tokenmount)?;
+        let tokenamount = to_u64(tokenamount)?;
         if withdraw_fee > 0 {
             Self::token_transfer(
                 swap_info.key,
@@ -433,7 +434,7 @@ impl Processor {
             stream_token_mint_info.clone(),
             user_transfer_authority_info.clone(),
             token_swap.nonce(),
-            pool_tokenmount,
+            tokenamount,
         )?;
 
         if token_amount > 0 {
@@ -444,12 +445,97 @@ impl Processor {
                 dest_token_info.clone(),
                 authority_info.clone(),
                 token_swap.nonce(),
-                pool_tokenmount,
+                tokenamount,
             )?;
         }
 
         Ok(())
     }
+
+        /// Processes an [DepositToken](enum.Instruction.html).
+        pub fn process_start_stream(
+            program_id: &Pubkey,
+            tokenamount: u64,
+            accounts: &[AccountInfo],
+        ) -> ProgramResult {
+            let account_info_iter = &mut accounts.iter();
+            let stream_token_info = next_account_info(account_info_iter)?;
+            let authority_info = next_account_info(account_info_iter)?;
+            let user_transfer_authority_info = next_account_info(account_info_iter)?;
+            let source_a_info = next_account_info(account_info_iter)?;
+            let token_info = next_account_info(account_info_iter)?;
+            let stream_token_mint_info = next_account_info(account_info_iter)?;
+            let receiver_info = next_account_info(account_info_iter)?;
+            let token_program_info = next_account_info(account_info_iter)?;
+    
+            let stream_token_data = StreamVersion::unpack(&stream_token_info.data.borrow())?;
+    
+            Self::check_accounts(
+                stream_token_data.as_ref(),
+                program_id,
+                stream_token_info,
+                authority_info,
+                token_info,
+                stream_token_mint_info,
+                token_program_info,
+                Some(source_a_info),
+                None,
+            )?;
+    
+            let token = Self::unpack_tokenccount(token_info, stream_token_data.token_program_id())?;
+            let stream_token_mint = Self::unpack_mint(stream_token_mint_info, stream_token_data.token_program_id())?;
+            let current_stream_token_mint_supply = to_u128(stream_token_mint.supply)?;
+            let (tokenamount, stream_token_mint_supply) = if current_stream_token_mint_supply > 0 {
+                (to_u128(tokenamount)?, current_stream_token_mint_supply)
+            } else {
+                // TODO:Check this
+                // (calculator.new_pool_supply(), calculator.new_pool_supply())
+                (to_u128(token.amount)?,current_stream_token_mint_supply)
+            };
+    
+            let tokenamount = to_u64(tokenamount)?;
+            let token_amount = token.amount;
+            if token_amount < tokenamount {
+                return Err(StreamError::InsufficientFunds.into());
+            }
+            if token_amount == 0 {
+                return Err(StreamError::ZeroTradingTokens.into());
+            }
+    
+    
+            // Self::token_transfer(
+            //     swap_info.key,
+            //     token_program_info.clone(),
+            //     source_a_info.clone(),
+            //     token_info.clone(),
+            //     user_transfer_authority_info.clone(),
+            //     stream_token_data.nonce(),
+            //     tokenamount,
+            // )?;
+    
+            // Self::token_mint_to(
+            //     swap_info.key,
+            //     token_program_info.clone(),
+            //     stream_token_mint_info.clone(),
+            //     dest_info.clone(),
+            //     authority_info.clone(),
+            //     stream_token_data.nonce(),
+            //     tokenamount,
+            // )?;
+
+            // let obj = StreamVersion::StreamV1(StreamV1 {
+            //     is_initialized: true,
+            //     nonce,
+            //     token_program_id,
+            //     token: *token_info.key,
+            //     stream_token_mint: *stream_token_mint_info.key,
+            //     token_mint: token.mint,
+            //     stream_fee_account: *fee_account_info.key,
+            // });
+            // StreamVersion::pack(obj, &mut swap_info.data.borrow_mut())?;
+    
+            Ok(())
+        }
 
     /// Processes an [Instruction](enum.Instruction.html).
     pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], input: &[u8]) -> ProgramResult {
@@ -477,22 +563,32 @@ impl Processor {
                 )
             }
             SwapInstruction::DepositToken(DepositToken {
-                pool_tokenmount,
+                tokenamount,
             }) => {
                 msg!("Instruction: DepositToken");
                 Self::process_deposit_token(
                     program_id,
-                    pool_tokenmount,
+                    tokenamount,
                     accounts,
                 )
             }
             SwapInstruction::WithdrawToken(WithdrawToken {
-                pool_tokenmount,
+                tokenamount,
             }) => {
                 msg!("Instruction: WithdrawToken");
                 Self::process_withdraw_token(
                     program_id,
-                    pool_tokenmount,
+                    tokenamount,
+                    accounts,
+                )
+            }
+            SwapInstruction::StartStream(StartStream {
+                tokenamount,
+            }) => {
+                msg!("Instruction: StartStream");
+                Self::process_start_stream(
+                    program_id,
+                    tokenamount,
                     accounts,
                 )
             }
@@ -807,7 +903,7 @@ mod tests {
             mut depositor_token_account: &mut Account,
             depositor_pool_key: &Pubkey,
             mut depositor_pool_account: &mut Account,
-            pool_tokenmount: u64,
+            tokenamount: u64,
         ) -> ProgramResult {
             let user_transfer_authority = Pubkey::new_unique();
             do_process_instruction(
@@ -817,7 +913,7 @@ mod tests {
                     &user_transfer_authority,
                     depositor_key,
                     &[],
-                    pool_tokenmount,
+                    tokenamount,
                 )
                 .unwrap(),
                 vec![
@@ -840,7 +936,7 @@ mod tests {
                     &self.stream_token_mint_key,
                     depositor_pool_key,
                     DepositToken {
-                        pool_tokenmount,
+                        tokenamount,
                     },
                 )
                 .unwrap(),
@@ -865,7 +961,7 @@ mod tests {
             mut pool_account: &mut Account,
             token_key: &Pubkey,
             mut token_account: &mut Account,
-            pool_tokenmount: u64,
+            tokenamount: u64,
         ) -> ProgramResult {
             let user_transfer_authority_key = Pubkey::new_unique();
             // approve user transfer authority to take out pool tokens
@@ -876,7 +972,7 @@ mod tests {
                     &user_transfer_authority_key,
                     user_key,
                     &[],
-                    pool_tokenmount,
+                    tokenamount,
                 )
                 .unwrap(),
                 vec![
@@ -901,7 +997,7 @@ mod tests {
                     &self.token_key,
                     token_key,
                     WithdrawToken {
-                        pool_tokenmount,
+                        tokenamount,
                     },
                 )
                 .unwrap(),
@@ -1096,7 +1192,7 @@ mod tests {
         let user_key = Pubkey::new_unique();
 
         let token_amount = 1000;
-        let pool_tokenmount = 10;
+        let tokenamount = 10;
 
         let mut accounts =
             SwapAccountInfo::new(&user_key, token_amount);
@@ -1280,7 +1376,7 @@ mod tests {
                 &mut accounts.stream_token_mint_account,
                 &accounts.authority_key,
                 &user_key,
-                pool_tokenmount,
+                tokenamount,
             );
 
             // non-empty pool token account
@@ -1718,7 +1814,7 @@ mod tests {
     //                     &accounts.stream_token_mint_key,
     //                     &pool_key,
     //                     DepositToken {
-    //                         pool_tokenmount: pool_amount.try_into().unwrap(),
+    //                         tokenamount: pool_amount.try_into().unwrap(),
     //                         maximum_token_amount: deposit_a,
     //                         maximum_token_b_amount: deposit_b,
     //                     },
@@ -1767,7 +1863,7 @@ mod tests {
     //                     &accounts.stream_token_mint_key,
     //                     &pool_key,
     //                     DepositToken {
-    //                         pool_tokenmount: pool_amount.try_into().unwrap(),
+    //                         tokenamount: pool_amount.try_into().unwrap(),
     //                         maximum_token_amount: deposit_a,
     //                         maximum_token_b_amount: deposit_b,
     //                     },
@@ -2334,7 +2430,7 @@ mod tests {
     //                     &token_key,
     //                     &token_b_key,
     //                     WithdrawToken {
-    //                         pool_tokenmount: withdraw_amount.try_into().unwrap(),
+    //                         tokenamount: withdraw_amount.try_into().unwrap(),
     //                         minimum_token_amount,
     //                         minimum_token_b_amount,
     //                     }
@@ -2391,7 +2487,7 @@ mod tests {
     //                     &token_key,
     //                     &token_b_key,
     //                     WithdrawToken {
-    //                         pool_tokenmount: withdraw_amount.try_into().unwrap(),
+    //                         tokenamount: withdraw_amount.try_into().unwrap(),
     //                         minimum_token_amount,
     //                         minimum_token_b_amount,
     //                     },

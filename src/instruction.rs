@@ -30,7 +30,7 @@ pub struct Initialize {
 pub struct DepositToken {
     /// Pool token amount to transfer. token and token_b amount are set by
     /// the current exchange rate and size of the pool
-    pub pool_tokenmount: u64,
+    pub tokenamount: u64,
 }
 
 /// WithdrawToken instruction data
@@ -40,9 +40,18 @@ pub struct DepositToken {
 pub struct WithdrawToken {
     /// Amount of pool tokens to burn. User receives an output of token a
     /// and b based on the percentage of the pool tokens that are returned.
-    pub pool_tokenmount: u64,
+    pub tokenamount: u64,
 }
 
+/// WithdrawToken instruction data
+#[cfg_attr(feature = "fuzz", derive(Arbitrary))]
+#[repr(C)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StartStream {
+    /// Amount of pool tokens to burn. User receives an output of token a
+    /// and b based on the percentage of the pool tokens that are returned.
+    pub tokenamount: u64,
+}
 /// Instructions supported by the token swap program.
 #[repr(C)]
 #[derive(Debug, PartialEq)]
@@ -93,6 +102,9 @@ pub enum SwapInstruction {
     ///   9. `[writable]` Fee account, to receive withdrawal fees
     ///   10 '[]` Token program id
     WithdrawToken(WithdrawToken),
+
+    ///  Start streaming a selected token
+    StartStream(StartStream),
 }
 
 impl SwapInstruction {
@@ -107,15 +119,21 @@ impl SwapInstruction {
                 })
             }
             1 => {
-                let (pool_tokenmount, rest) = Self::unpack_u64(rest)?;
+                let (tokenamount, rest) = Self::unpack_u64(rest)?;
                 Self::DepositToken(DepositToken {
-                    pool_tokenmount
+                    tokenamount
                 })
             }
             2 => {
-                let (pool_tokenmount, rest) = Self::unpack_u64(rest)?;
+                let (tokenamount, rest) = Self::unpack_u64(rest)?;
                 Self::WithdrawToken(WithdrawToken {
-                    pool_tokenmount,
+                    tokenamount,
+                })
+            }
+            3 => {
+                let (tokenamount, rest) = Self::unpack_u64(rest)?;
+                Self::StartStream(StartStream {
+                    tokenamount,
                 })
             }
             _ => return Err(StreamError::InvalidInstruction.into()),
@@ -147,16 +165,22 @@ impl SwapInstruction {
                 buf.push(*nonce);
             }
             Self::DepositToken(DepositToken {
-                pool_tokenmount,
+                tokenamount,
             }) => {
                 buf.push(1);
-                buf.extend_from_slice(&pool_tokenmount.to_le_bytes());
+                buf.extend_from_slice(&tokenamount.to_le_bytes());
             }
             Self::WithdrawToken(WithdrawToken {
-                pool_tokenmount,
+                tokenamount,
             }) => {
                 buf.push(2);
-                buf.extend_from_slice(&pool_tokenmount.to_le_bytes());
+                buf.extend_from_slice(&tokenamount.to_le_bytes());
+            }
+            Self::StartStream(StartStream {
+                tokenamount,
+            }) => {
+                buf.push(3);
+                buf.extend_from_slice(&tokenamount.to_le_bytes());
             }
         }
         buf
@@ -265,6 +289,39 @@ pub fn withdraw_token(
     })
 }
 
+/// Creates a 'start_stream' instruction.
+pub fn start_stream(
+    program_id: &Pubkey,
+    token_program_id: &Pubkey,
+    stream_token_info_pubkey: &Pubkey,
+    authority_pubkey: &Pubkey,
+    user_transfer_authority_pubkey: &Pubkey,
+    deposit_token_pubkey: &Pubkey,
+    stream_token_pubkey: &Pubkey,
+    stream_token_mint_pubkey: &Pubkey,
+    receiver_pubkey: &Pubkey,
+    instruction: StartStream,
+) -> Result<Instruction, ProgramError> {
+    let data = SwapInstruction::StartStream(instruction).pack();
+
+    let accounts = vec![
+        AccountMeta::new_readonly(*stream_token_info_pubkey, false),
+        AccountMeta::new_readonly(*authority_pubkey, false),
+        AccountMeta::new_readonly(*user_transfer_authority_pubkey, true),
+        AccountMeta::new(*deposit_token_pubkey, false),
+        AccountMeta::new(*stream_token_pubkey, false),
+        AccountMeta::new(*stream_token_mint_pubkey, false),
+        AccountMeta::new(*receiver_pubkey, false),
+        AccountMeta::new_readonly(*token_program_id, false),
+    ];
+
+    Ok(Instruction {
+        program_id: *program_id,
+        accounts,
+        data,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,13 +343,13 @@ mod tests {
 
     #[test]
     fn pack_deposit() {
-        let pool_tokenmount: u64 = 5;
+        let tokenamount: u64 = 5;
         let check = SwapInstruction::DepositToken(DepositToken {
-            pool_tokenmount,
+            tokenamount,
         });
         let packed = check.pack();
         let mut expect = vec![1];
-        expect.extend_from_slice(&pool_tokenmount.to_le_bytes());
+        expect.extend_from_slice(&tokenamount.to_le_bytes());
         assert_eq!(packed, expect);
         let unpacked = SwapInstruction::unpack(&expect).unwrap();
         assert_eq!(unpacked, check);
@@ -300,14 +357,27 @@ mod tests {
 
     #[test]
     fn pack_withdraw() {
-        let pool_tokenmount: u64 = 1212438012089;
-        let minimum_token_amount: u64 = 102198761982612;
+        let tokenamount: u64 = 1212438012089;
         let check = SwapInstruction::WithdrawToken(WithdrawToken {
-            pool_tokenmount,
+            tokenamount,
         });
         let packed = check.pack();
         let mut expect = vec![2];
-        expect.extend_from_slice(&pool_tokenmount.to_le_bytes());
+        expect.extend_from_slice(&tokenamount.to_le_bytes());
+        assert_eq!(packed, expect);
+        let unpacked = SwapInstruction::unpack(&expect).unwrap();
+        assert_eq!(unpacked, check);
+    }
+
+    #[test]
+    fn pack_start_stream() {
+        let tokenamount: u64 = 1212438012089;
+        let check = SwapInstruction::StartStream(StartStream {
+            tokenamount,
+        });
+        let packed = check.pack();
+        let mut expect = vec![3];
+        expect.extend_from_slice(&tokenamount.to_le_bytes());
         assert_eq!(packed, expect);
         let unpacked = SwapInstruction::unpack(&expect).unwrap();
         assert_eq!(unpacked, check);
