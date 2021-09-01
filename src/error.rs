@@ -6,7 +6,7 @@ use thiserror::Error;
 
 /// Errors that may be returned by the TokenSwap program.
 #[derive(Clone, Debug, Eq, Error, FromPrimitive, PartialEq)]
-pub enum StreamError {
+pub enum StreamTokenError {
     // 0.
     /// The account cannot be initialized because it is already being used.
     #[error("Swap account already in use")]
@@ -107,6 +107,30 @@ pub enum StreamError {
     UnsupportedCurveOperation,
 }
 
+impl From<StreamTokenError> for ProgramError {
+    fn from(e: StreamTokenError) -> Self {
+        ProgramError::Custom(e as u32)
+    }
+}
+impl<T> DecodeError<T> for StreamTokenError {
+    fn type_of() -> &'static str {
+        "Stream Token Error"
+    }
+}
+
+/// Error occured while updating streaming data
+#[derive(Clone, Debug, Eq, Error, FromPrimitive, PartialEq)]
+pub enum StreamError {
+
+    /// An active stream already exists to the receiver
+    #[error("An active stream already exists to the receiver")]
+    StreamAlreadyActive,
+    /// The calculation lead to an overflow or underflow
+    #[error("The calculation lead to an overflow or underflow")]
+    MathOverflowError,
+}
+
+
 impl From<StreamError> for ProgramError {
     fn from(e: StreamError) -> Self {
         ProgramError::Custom(e as u32)
@@ -114,6 +138,6 @@ impl From<StreamError> for ProgramError {
 }
 impl<T> DecodeError<T> for StreamError {
     fn type_of() -> &'static str {
-        "Swap Error"
+        "Stream Error"
     }
 }

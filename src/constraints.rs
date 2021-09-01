@@ -1,7 +1,7 @@
 //! Various constraints as required for production environments
 
 use crate::{
-    error::StreamError,
+    error::StreamTokenError,
 };
 
 use solana_program::program_error::ProgramError;

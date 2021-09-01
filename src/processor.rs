@@ -2,13 +2,15 @@
 
 use crate::constraints::{Constraints, SWAP_CONSTRAINTS};
 use crate::{
-    error::StreamError,
+    error::StreamTokenError,
     instruction::{
         DepositToken, Initialize,
         SwapInstruction, WithdrawToken,
-        StartStream,
+        StartStream,StopStream
     },
-    state::{StreamState, StreamV1, StreamVersion},
+    state::{StreamState, StreamV1, StreamVersion, 
+        UserStreamInfo, BilateralStreamAgreement, UserStreamBalance,
+        AddBilateralStreamParams, StreamAgreement},
 };
 use num_traits::FromPrimitive;
 use solana_program::{
@@ -21,6 +23,8 @@ use solana_program::{
     program_option::COption,
     program_pack::Pack,
     pubkey::Pubkey,
+    sysvar::{clock::Clock, fees::Fees, rent::Rent, Sysvar},
+
 };
 use std::convert::TryInto;
 
@@ -31,12 +35,12 @@ impl Processor {
     pub fn unpack_tokenccount(
         account_info: &AccountInfo,
         token_program_id: &Pubkey,
-    ) -> Result<spl_token::state::Account, StreamError> {
+    ) -> Result<spl_token::state::Account, StreamTokenError> {
         if account_info.owner != token_program_id {
-            Err(StreamError::IncorrectTokenProgramId)
+            Err(StreamTokenError::IncorrectTokenProgramId)
         } else {
             spl_token::state::Account::unpack(&account_info.data.borrow())
-                .map_err(|_| StreamError::ExpectedAccount)
+                .map_err(|_| StreamTokenError::ExpectedAccount)
         }
     }
 
@@ -44,12 +48,12 @@ impl Processor {
     pub fn unpack_mint(
         account_info: &AccountInfo,
         token_program_id: &Pubkey,
-    ) -> Result<spl_token::state::Mint, StreamError> {
+    ) -> Result<spl_token::state::Mint, StreamTokenError> {
         if account_info.owner != token_program_id {
-            Err(StreamError::IncorrectTokenProgramId)
+            Err(StreamTokenError::IncorrectTokenProgramId)
         } else {
             spl_token::state::Mint::unpack(&account_info.data.borrow())
-                .map_err(|_| StreamError::ExpectedMint)
+                .map_err(|_| StreamTokenError::ExpectedMint)
         }
     }
 
@@ -58,9 +62,9 @@ impl Processor {
         program_id: &Pubkey,
         my_info: &Pubkey,
         nonce: u8,
-    ) -> Result<Pubkey, StreamError> {
+    ) -> Result<Pubkey, StreamTokenError> {
         Pubkey::create_program_address(&[&my_info.to_bytes()[..32], &[nonce]], program_id)
-            .or(Err(StreamError::InvalidProgramAddress))
+            .or(Err(StreamTokenError::InvalidProgramAddress))
     }
 
     /// Issue a spl_token `Burn` instruction.
@@ -164,25 +168,25 @@ impl Processor {
         if *authority_info.key
             != Self::authority_id(program_id, swap_account_info.key, token_swap.nonce())?
         {
-            return Err(StreamError::InvalidProgramAddress.into());
+            return Err(StreamTokenError::InvalidProgramAddress.into());
         }
         if *token_info.key != *token_swap.token_account() {
-            return Err(StreamError::IncorrectSwapAccount.into());
+            return Err(StreamTokenError::IncorrectSwapAccount.into());
         }
         if *stream_token_mint_info.key != *token_swap.stream_token_mint() {
-            return Err(StreamError::IncorrectPoolMint.into());
+            return Err(StreamTokenError::IncorrectPoolMint.into());
         }
         if *token_program_info.key != *token_swap.token_program_id() {
-            return Err(StreamError::IncorrectTokenProgramId.into());
+            return Err(StreamTokenError::IncorrectTokenProgramId.into());
         }
         if let Some(user_token_info) = user_token_info {
             if token_info.key == user_token_info.key {
-                return Err(StreamError::InvalidInput.into());
+                return Err(StreamTokenError::InvalidInput.into());
             }
         }
         if let Some(stream_fee_account_info) = stream_fee_account_info {
             if *stream_fee_account_info.key != *token_swap.stream_fee_account() {
-                return Err(StreamError::IncorrectFeeAccount.into());
+                return Err(StreamTokenError::IncorrectFeeAccount.into());
             }
         }
         Ok(())
@@ -206,58 +210,58 @@ impl Processor {
 
         let token_program_id = *token_program_info.key;
         if StreamVersion::is_initialized(&swap_info.data.borrow()) {
-            return Err(StreamError::AlreadyInUse.into());
+            return Err(StreamTokenError::AlreadyInUse.into());
         }
 
         if *authority_info.key != Self::authority_id(program_id, swap_info.key, nonce)? {
-            return Err(StreamError::InvalidProgramAddress.into());
+            return Err(StreamTokenError::InvalidProgramAddress.into());
         }
         let token = Self::unpack_tokenccount(token_info, &token_program_id)?;
         let fee_account = Self::unpack_tokenccount(fee_account_info, &token_program_id)?;
         let destination = Self::unpack_tokenccount(destination_info, &token_program_id)?;
         let stream_token_mint = Self::unpack_mint(stream_token_mint_info, &token_program_id)?;
         if *authority_info.key != token.owner {
-            return Err(StreamError::InvalidOwner.into());
+            return Err(StreamTokenError::InvalidOwner.into());
         }
         if *authority_info.key == destination.owner {
-            return Err(StreamError::InvalidOutputOwner.into());
+            return Err(StreamTokenError::InvalidOutputOwner.into());
         }
         if *authority_info.key == fee_account.owner {
-            return Err(StreamError::InvalidOutputOwner.into());
+            return Err(StreamTokenError::InvalidOutputOwner.into());
         }
         if COption::Some(*authority_info.key) != stream_token_mint.mint_authority {
-            return Err(StreamError::InvalidOwner.into());
+            return Err(StreamTokenError::InvalidOwner.into());
         }
 
         if token.amount == 0 {
-            return Err(StreamError::EmptySupply.into());
+            return Err(StreamTokenError::EmptySupply.into());
         }
       
         if token.delegate.is_some() {
-            return Err(StreamError::InvalidDelegate.into());
+            return Err(StreamTokenError::InvalidDelegate.into());
         }
 
         if token.close_authority.is_some() {
-            return Err(StreamError::InvalidCloseAuthority.into());
+            return Err(StreamTokenError::InvalidCloseAuthority.into());
         }
 
         if stream_token_mint.supply != 0 {
-            return Err(StreamError::InvalidSupply.into());
+            return Err(StreamTokenError::InvalidSupply.into());
         }
         if stream_token_mint.freeze_authority.is_some() {
-            return Err(StreamError::InvalidFreezeAuthority.into());
+            return Err(StreamTokenError::InvalidFreezeAuthority.into());
         }
         if *stream_token_mint_info.key != fee_account.mint {
-            return Err(StreamError::IncorrectPoolMint.into());
+            return Err(StreamTokenError::IncorrectPoolMint.into());
         }
 
         if let Some(swap_constraints) = swap_constraints {
             let owner_key = swap_constraints
                 .owner_key
                 .parse::<Pubkey>()
-                .map_err(|_| StreamError::InvalidOwner)?;
+                .map_err(|_| StreamTokenError::InvalidOwner)?;
             if fee_account.owner != owner_key {
-                return Err(StreamError::InvalidOwner.into());
+                return Err(StreamTokenError::InvalidOwner.into());
             }
         }
 
@@ -331,10 +335,10 @@ impl Processor {
         let tokenamount = to_u64(tokenamount)?;
         let token_amount = token.amount;
         if token_amount < tokenamount {
-            return Err(StreamError::InsufficientFunds.into());
+            return Err(StreamTokenError::InsufficientFunds.into());
         }
         if token_amount == 0 {
-            return Err(StreamError::ZeroTradingTokens.into());
+            return Err(StreamTokenError::ZeroTradingTokens.into());
         }
 
 
@@ -403,16 +407,16 @@ impl Processor {
             // token_swap
             //     .fees()
             //     .owner_withdraw_fee(to_u128(tokenamount)?)
-            //     .ok_or(StreamError::FeeCalculationFailure)?
+            //     .ok_or(StreamTokenError::FeeCalculationFailure)?
         };
         let tokenamount = to_u128(tokenamount)?
             .checked_sub(withdraw_fee)
-            .ok_or(StreamError::CalculationFailure)?;
+            .ok_or(StreamTokenError::CalculationFailure)?;
 
         let token_amount = token.amount;
 
         if token_amount == 0 && token.amount != 0 {
-            return Err(StreamError::ZeroTradingTokens.into());
+            return Err(StreamTokenError::ZeroTradingTokens.into());
         }
     
         let tokenamount = to_u64(tokenamount)?;
@@ -455,85 +459,162 @@ impl Processor {
         /// Processes an [DepositToken](enum.Instruction.html).
         pub fn process_start_stream(
             program_id: &Pubkey,
-            tokenamount: u64,
+            flow_rate: u64,
             accounts: &[AccountInfo],
         ) -> ProgramResult {
             let account_info_iter = &mut accounts.iter();
             let stream_token_info = next_account_info(account_info_iter)?;
             let authority_info = next_account_info(account_info_iter)?;
             let user_transfer_authority_info = next_account_info(account_info_iter)?;
-            let source_a_info = next_account_info(account_info_iter)?;
-            let token_info = next_account_info(account_info_iter)?;
-            let stream_token_mint_info = next_account_info(account_info_iter)?;
-            let receiver_info = next_account_info(account_info_iter)?;
+            let user_stream_token_account = next_account_info(account_info_iter)?;
+            let user_stream_agreements_account = next_account_info(account_info_iter)?;
+            let receiver_stream_token_account = next_account_info(account_info_iter)?;
+            let receiver_stream_agreements_account = next_account_info(account_info_iter)?;
             let token_program_info = next_account_info(account_info_iter)?;
     
             let stream_token_data = StreamVersion::unpack(&stream_token_info.data.borrow())?;
     
-            Self::check_accounts(
-                stream_token_data.as_ref(),
-                program_id,
-                stream_token_info,
-                authority_info,
-                token_info,
-                stream_token_mint_info,
-                token_program_info,
-                Some(source_a_info),
-                None,
-            )?;
-    
-            let token = Self::unpack_tokenccount(token_info, stream_token_data.token_program_id())?;
-            let stream_token_mint = Self::unpack_mint(stream_token_mint_info, stream_token_data.token_program_id())?;
-            let current_stream_token_mint_supply = to_u128(stream_token_mint.supply)?;
-            let (tokenamount, stream_token_mint_supply) = if current_stream_token_mint_supply > 0 {
-                (to_u128(tokenamount)?, current_stream_token_mint_supply)
-            } else {
-                // TODO:Check this
-                // (calculator.new_pool_supply(), calculator.new_pool_supply())
-                (to_u128(token.amount)?,current_stream_token_mint_supply)
-            };
-    
-            let tokenamount = to_u64(tokenamount)?;
-            let token_amount = token.amount;
-            if token_amount < tokenamount {
-                return Err(StreamError::InsufficientFunds.into());
-            }
-            if token_amount == 0 {
-                return Err(StreamError::ZeroTradingTokens.into());
-            }
-    
-    
-            // Self::token_transfer(
-            //     swap_info.key,
-            //     token_program_info.clone(),
-            //     source_a_info.clone(),
-            //     token_info.clone(),
-            //     user_transfer_authority_info.clone(),
-            //     stream_token_data.nonce(),
-            //     tokenamount,
+            // Self::check_accounts(
+            //     stream_token_data.as_ref(),
+            //     program_id,
+            //     stream_token_info,
+            //     authority_info,
+            //     token_info,
+            //     stream_token_mint_info,
+            //     token_program_info,
+            //     Some(source_a_info),
+            //     None,
             // )?;
     
-            // Self::token_mint_to(
-            //     swap_info.key,
-            //     token_program_info.clone(),
-            //     stream_token_mint_info.clone(),
-            //     dest_info.clone(),
-            //     authority_info.clone(),
-            //     stream_token_data.nonce(),
-            //     tokenamount,
-            // )?;
+            let stream_token = Self::unpack_tokenccount(user_stream_token_account, stream_token_data.token_program_id())?;
 
-            // let obj = StreamVersion::StreamV1(StreamV1 {
-            //     is_initialized: true,
-            //     nonce,
-            //     token_program_id,
-            //     token: *token_info.key,
-            //     stream_token_mint: *stream_token_mint_info.key,
-            //     token_mint: token.mint,
-            //     stream_fee_account: *fee_account_info.key,
-            // });
-            // StreamVersion::pack(obj, &mut swap_info.data.borrow_mut())?;
+            let stream_token_amount = stream_token.amount;
+
+            let threshold_amount = 0u64;
+            if stream_token_amount < threshold_amount {
+                return Err(StreamTokenError::InsufficientFunds.into());
+            }
+            if stream_token_amount == 0 {
+                return Err(StreamTokenError::ZeroTradingTokens.into());
+            }
+
+            let now = Clock::get()?.unix_timestamp as u64;
+            let mut user_stream_info = UserStreamInfo::unpack(&user_stream_agreements_account.data.borrow())?;
+            let mut receiver_stream_info = UserStreamInfo::unpack(&receiver_stream_agreements_account.data.borrow())?;
+
+            if !user_stream_info.is_initialized {
+                user_stream_info = UserStreamInfo::new(*stream_token_info.key)
+            }
+            let agreementInfo = BilateralStreamAgreement {
+                flow_rate: flow_rate,
+                sender: *user_stream_token_account.key,
+                receiver: *receiver_stream_token_account.key,
+            };
+
+            let mut add_stream_params_user = AddBilateralStreamParams{
+                user_stream_info: user_stream_info,
+                sender: *user_stream_token_account.key,
+                receiver: *receiver_stream_token_account.key,
+                is_user_sender: true,
+                flow_rate: flow_rate,
+                now:now,
+            };
+
+            let mut add_stream_params_receiver = AddBilateralStreamParams{
+                user_stream_info: receiver_stream_info,
+                sender: *user_stream_token_account.key,
+                receiver: *receiver_stream_token_account.key,
+                is_user_sender: false,
+                flow_rate: flow_rate,
+                now:now,
+            };
+
+            let user_stream_info_updated = agreementInfo.add_stream(add_stream_params_user)?;
+            let receiver_stream_info_updated = agreementInfo.add_stream(add_stream_params_receiver)?;
+
+            UserStreamInfo::pack(user_stream_info_updated, &mut user_stream_agreements_account.data.borrow_mut())?;
+            UserStreamInfo::pack(receiver_stream_info_updated, &mut receiver_stream_agreements_account.data.borrow_mut())?;
+
+            Ok(())
+        }
+        ///Function to stop a stream
+        pub fn process_stop_stream(
+            program_id: &Pubkey,
+            accounts: &[AccountInfo],
+        ) -> ProgramResult {
+            let account_info_iter = &mut accounts.iter();
+            let stream_token_info = next_account_info(account_info_iter)?;
+            let authority_info = next_account_info(account_info_iter)?;
+            let user_transfer_authority_info = next_account_info(account_info_iter)?;
+            let user_stream_token_account = next_account_info(account_info_iter)?;
+            let user_stream_agreements_account = next_account_info(account_info_iter)?;
+            let receiver_stream_token_account = next_account_info(account_info_iter)?;
+            let receiver_stream_agreements_account = next_account_info(account_info_iter)?;
+            let token_program_info = next_account_info(account_info_iter)?;
     
+            let stream_token_data = StreamVersion::unpack(&stream_token_info.data.borrow())?;
+    
+            // Self::check_accounts(
+            //     stream_token_data.as_ref(),
+            //     program_id,
+            //     stream_token_info,
+            //     authority_info,
+            //     token_info,
+            //     stream_token_mint_info,
+            //     token_program_info,
+            //     Some(source_a_info),
+            //     None,
+            // )?;
+    
+            let stream_token = Self::unpack_tokenccount(user_stream_token_account, stream_token_data.token_program_id())?;
+
+            let stream_token_amount = stream_token.amount;
+
+            let threshold_amount = 0u64;
+            if stream_token_amount < threshold_amount {
+                return Err(StreamTokenError::InsufficientFunds.into());
+            }
+            if stream_token_amount == 0 {
+                return Err(StreamTokenError::ZeroTradingTokens.into());
+            }
+
+            let now = Clock::get()?.unix_timestamp as u64;
+            let mut user_stream_info = UserStreamInfo::unpack(&user_stream_agreements_account.data.borrow())?;
+            let mut receiver_stream_info = UserStreamInfo::unpack(&receiver_stream_agreements_account.data.borrow())?;
+
+            if !user_stream_info.is_initialized {
+                user_stream_info = UserStreamInfo::new(*stream_token_info.key)
+            }
+            // let agreementInfo = BilateralStreamAgreement {
+            //     flow_rate: flow_rate,
+            //     sender: *user_stream_token_account.key,
+            //     receiver: *receiver_stream_token_account.key,
+            // };
+
+            // let mut add_stream_params_user = AddBilateralStreamParams{
+            //     user_stream_info: user_stream_info,
+            //     sender: *user_stream_token_account.key,
+            //     receiver: *receiver_stream_token_account.key,
+            //     is_user_sender: true,
+            //     flow_rate: flow_rate,
+            //     now:now,
+            // };
+
+            // let mut add_stream_params_receiver = AddBilateralStreamParams{
+            //     user_stream_info: receiver_stream_info,
+            //     sender: *user_stream_token_account.key,
+            //     receiver: *receiver_stream_token_account.key,
+            //     is_user_sender: false,
+            //     flow_rate: flow_rate,
+            //     now:now,
+            // };
+
+            // let user_stream_info_updated = agreementInfo.add_stream(add_stream_params_user)?;
+            // let receiver_stream_info_updated = agreementInfo.add_stream(add_stream_params_receiver)?;
+
+            // UserStreamInfo::pack(user_stream_info_updated, &mut user_stream_agreements_account.data.borrow_mut())?;
+            // UserStreamInfo::pack(receiver_stream_info_updated, &mut receiver_stream_agreements_account.data.borrow_mut())?;
+
             Ok(())
         }
 
@@ -583,12 +664,20 @@ impl Processor {
                 )
             }
             SwapInstruction::StartStream(StartStream {
-                tokenamount,
+                flow_rate,
             }) => {
                 msg!("Instruction: StartStream");
                 Self::process_start_stream(
                     program_id,
-                    tokenamount,
+                    flow_rate,
+                    accounts,
+                )
+            }
+            SwapInstruction::StopStream(StopStream {
+            }) => {
+                msg!("Instruction: StartStream");
+                Self::process_stop_stream(
+                    program_id,
                     accounts,
                 )
             }
@@ -597,83 +686,83 @@ impl Processor {
     }
 }
 
-impl PrintProgramError for StreamError {
+impl PrintProgramError for StreamTokenError {
     fn print<E>(&self)
     where
         E: 'static + std::error::Error + DecodeError<E> + PrintProgramError + FromPrimitive,
     {
         match self {
-            StreamError::AlreadyInUse => msg!("Error: Swap account already in use"),
-            StreamError::InvalidProgramAddress => {
+            StreamTokenError::AlreadyInUse => msg!("Error: Swap account already in use"),
+            StreamTokenError::InvalidProgramAddress => {
                 msg!("Error: Invalid program address generated from nonce and key")
             }
-            StreamError::InvalidOwner => {
+            StreamTokenError::InvalidOwner => {
                 msg!("Error: The input account owner is not the program address")
             }
-            StreamError::InvalidOutputOwner => {
+            StreamTokenError::InvalidOutputOwner => {
                 msg!("Error: Output pool account owner cannot be the program address")
             }
-            StreamError::ExpectedMint => msg!("Error: Deserialized account is not an SPL Token mint"),
-            StreamError::ExpectedAccount => {
+            StreamTokenError::ExpectedMint => msg!("Error: Deserialized account is not an SPL Token mint"),
+            StreamTokenError::ExpectedAccount => {
                 msg!("Error: Deserialized account is not an SPL Token account")
             }
-            StreamError::EmptySupply => msg!("Error: Input token account empty"),
-            StreamError::InvalidSupply => msg!("Error: Pool token mint has a non-zero supply"),
-            StreamError::RepeatedMint => msg!("Error: Swap input token accounts have the same mint"),
-            StreamError::InvalidDelegate => msg!("Error: Token account has a delegate"),
-            StreamError::InvalidInput => msg!("Error: InvalidInput"),
-            StreamError::IncorrectSwapAccount => {
+            StreamTokenError::EmptySupply => msg!("Error: Input token account empty"),
+            StreamTokenError::InvalidSupply => msg!("Error: Pool token mint has a non-zero supply"),
+            StreamTokenError::RepeatedMint => msg!("Error: Swap input token accounts have the same mint"),
+            StreamTokenError::InvalidDelegate => msg!("Error: Token account has a delegate"),
+            StreamTokenError::InvalidInput => msg!("Error: InvalidInput"),
+            StreamTokenError::IncorrectSwapAccount => {
                 msg!("Error: Address of the provided swap token account is incorrect")
             }
-            StreamError::IncorrectPoolMint => {
+            StreamTokenError::IncorrectPoolMint => {
                 msg!("Error: Address of the provided pool token mint is incorrect")
             }
-            StreamError::InvalidOutput => msg!("Error: InvalidOutput"),
-            StreamError::CalculationFailure => msg!("Error: CalculationFailure"),
-            StreamError::InvalidInstruction => msg!("Error: InvalidInstruction"),
-            StreamError::ExceededSlippage => {
+            StreamTokenError::InvalidOutput => msg!("Error: InvalidOutput"),
+            StreamTokenError::CalculationFailure => msg!("Error: CalculationFailure"),
+            StreamTokenError::InvalidInstruction => msg!("Error: InvalidInstruction"),
+            StreamTokenError::ExceededSlippage => {
                 msg!("Error: Swap instruction exceeds desired slippage limit")
             }
-            StreamError::InvalidCloseAuthority => msg!("Error: Token account has a close authority"),
-            StreamError::InvalidFreezeAuthority => {
+            StreamTokenError::InvalidCloseAuthority => msg!("Error: Token account has a close authority"),
+            StreamTokenError::InvalidFreezeAuthority => {
                 msg!("Error: Pool token mint has a freeze authority")
             }
-            StreamError::IncorrectFeeAccount => msg!("Error: Pool fee token account incorrect"),
-            StreamError::ZeroTradingTokens => {
+            StreamTokenError::IncorrectFeeAccount => msg!("Error: Pool fee token account incorrect"),
+            StreamTokenError::ZeroTradingTokens => {
                 msg!("Error: Given pool token amount results in zero trading tokens")
             }
-            StreamError::FeeCalculationFailure => msg!(
+            StreamTokenError::FeeCalculationFailure => msg!(
                 "Error: The fee calculation failed due to overflow, underflow, or unexpected 0"
             ),
-            StreamError::ConversionFailure => msg!("Error: Conversion to or from u64 failed."),
-            StreamError::InvalidFee => {
+            StreamTokenError::ConversionFailure => msg!("Error: Conversion to or from u64 failed."),
+            StreamTokenError::InvalidFee => {
                 msg!("Error: The provided fee does not match the program owner's constraints")
             }
-            StreamError::IncorrectTokenProgramId => {
+            StreamTokenError::IncorrectTokenProgramId => {
                 msg!("Error: The provided token program does not match the token program expected by the swap")
             }
-            StreamError::UnsupportedCurveType => {
+            StreamTokenError::UnsupportedCurveType => {
                 msg!("Error: The provided curve type is not supported by the program owner")
             }
-            StreamError::InvalidCurve => {
+            StreamTokenError::InvalidCurve => {
                 msg!("Error: The provided curve parameters are invalid")
             }
-            StreamError::InsufficientFunds => {
+            StreamTokenError::InsufficientFunds => {
                 msg!("Error: The balance of input tokens is not enough")
             }
-            StreamError::UnsupportedCurveOperation => {
+            StreamTokenError::UnsupportedCurveOperation => {
                 msg!("Error: The operation cannot be performed on the given curve")
             }
         }
     }
 }
 
-fn to_u128(val: u64) -> Result<u128, StreamError> {
-    val.try_into().map_err(|_| StreamError::ConversionFailure)
+fn to_u128(val: u64) -> Result<u128, StreamTokenError> {
+    val.try_into().map_err(|_| StreamTokenError::ConversionFailure)
 }
 
-fn to_u64(val: u128) -> Result<u64, StreamError> {
-    val.try_into().map_err(|_| StreamError::ConversionFailure)
+fn to_u64(val: u128) -> Result<u64, StreamTokenError> {
+    val.try_into().map_err(|_| StreamTokenError::ConversionFailure)
 }
 
 #[cfg(test)]
@@ -682,7 +771,7 @@ mod tests {
     use crate::{
         instruction::{
             deposit_token, initialize,
-            withdraw_token,
+            withdraw_token, start_stream
         },
     };
     use solana_program::{instruction::Instruction, program_stubs, rent::Rent};
@@ -1014,6 +1103,59 @@ mod tests {
                 ],
             )
         }
+
+        // #[allow(clippy::too_many_arguments)]
+        // pub fn start_stream(
+        //     &mut self,
+        //     user_key: &Pubkey,
+        //     pool_key: &Pubkey,
+        //     mut pool_account: &mut Account,
+        //     token_key: &Pubkey,
+        //     mut token_account: &mut Account,
+        //     flow_rate: u64,
+        // ) -> ProgramResult {
+        //     let user_transfer_authority_key = Pubkey::new_unique();
+        //     // approve user transfer authority to take out pool tokens
+        //     do_process_instruction(
+        //         approve(
+        //             &spl_token::id(),
+        //             pool_key,
+        //             &user_transfer_authority_key,
+        //             user_key,
+        //             &[],
+        //             tokenamount,
+        //         )
+        //         .unwrap(),
+        //         vec![
+        //             &mut pool_account,
+        //             &mut Account::default(),
+        //             &mut Account::default(),
+        //         ],
+        //     )
+        //     .unwrap();
+
+        //     // withdraw token a and b correctly
+        //     do_process_instruction(
+        //         start_stream(
+                    
+        //             StartStream {
+        //                 flow_rate,
+        //             },
+        //         )
+        //         .unwrap(),
+        //         vec![
+        //             &mut self.swap_account,
+        //             &mut Account::default(),
+        //             &mut Account::default(),
+        //             &mut self.stream_token_mint_account,
+        //             &mut pool_account,
+        //             &mut self.token_account,
+        //             &mut token_account,
+        //             &mut self.stream_fee_account,
+        //             &mut Account::default(),
+        //         ],
+        //     )
+        // }
     }
 
     fn mint_minimum_balance() -> u64 {
@@ -1202,7 +1344,7 @@ mod tests {
             let old_nonce = accounts.nonce;
             accounts.nonce = old_nonce - 1;
             assert_eq!(
-                Err(StreamError::InvalidProgramAddress.into()),
+                Err(StreamTokenError::InvalidProgramAddress.into()),
                 accounts.initialize_swap()
             );
             accounts.nonce = old_nonce;
@@ -1213,7 +1355,7 @@ mod tests {
             let old_account = accounts.token_account;
             accounts.token_account = Account::new(0, 0, &spl_token::id());
             assert_eq!(
-                Err(StreamError::ExpectedAccount.into()),
+                Err(StreamTokenError::ExpectedAccount.into()),
                 accounts.initialize_swap()
             );
             accounts.token_account = old_account;
@@ -1224,7 +1366,7 @@ mod tests {
             let old_account = accounts.stream_token_mint_account;
             accounts.stream_token_mint_account = Account::new(0, 0, &spl_token::id());
             assert_eq!(
-                Err(StreamError::ExpectedMint.into()),
+                Err(StreamTokenError::ExpectedMint.into()),
                 accounts.initialize_swap()
             );
             accounts.stream_token_mint_account = old_account;
@@ -1243,7 +1385,7 @@ mod tests {
             let old_account = accounts.token_account;
             accounts.token_account = token_account;
             assert_eq!(
-                Err(StreamError::InvalidOwner.into()),
+                Err(StreamTokenError::InvalidOwner.into()),
                 accounts.initialize_swap()
             );
             accounts.token_account = old_account;
@@ -1262,7 +1404,7 @@ mod tests {
             let old_account = accounts.pool_tokenccount;
             accounts.pool_tokenccount = pool_tokenccount;
             assert_eq!(
-                Err(StreamError::InvalidOutputOwner.into()),
+                Err(StreamTokenError::InvalidOutputOwner.into()),
                 accounts.initialize_swap()
             );
             accounts.pool_tokenccount = old_account;
@@ -1281,7 +1423,7 @@ mod tests {
             let old_account = accounts.stream_fee_account;
             accounts.stream_fee_account = stream_fee_account;
             assert_eq!(
-                Err(StreamError::InvalidOutputOwner.into()),
+                Err(StreamTokenError::InvalidOutputOwner.into()),
                 accounts.initialize_swap()
             );
             accounts.stream_fee_account = old_account;
@@ -1294,7 +1436,7 @@ mod tests {
             let old_mint = accounts.stream_token_mint_account;
             accounts.stream_token_mint_account = stream_token_mint_account;
             assert_eq!(
-                Err(StreamError::InvalidOwner.into()),
+                Err(StreamTokenError::InvalidOwner.into()),
                 accounts.initialize_swap()
             );
             accounts.stream_token_mint_account = old_mint;
@@ -1307,7 +1449,7 @@ mod tests {
             let old_mint = accounts.stream_token_mint_account;
             accounts.stream_token_mint_account = stream_token_mint_account;
             assert_eq!(
-                Err(StreamError::InvalidFreezeAuthority.into()),
+                Err(StreamTokenError::InvalidFreezeAuthority.into()),
                 accounts.initialize_swap()
             );
             accounts.stream_token_mint_account = old_mint;
@@ -1327,7 +1469,7 @@ mod tests {
             let old_account = accounts.token_account;
             accounts.token_account = token_account;
             assert_eq!(
-                Err(StreamError::IncorrectTokenProgramId.into()),
+                Err(StreamTokenError::IncorrectTokenProgramId.into()),
                 accounts.initialize_swap()
             );
             accounts.token_account = old_account;
@@ -1346,7 +1488,7 @@ mod tests {
             let old_account = accounts.token_account;
             accounts.token_account = token_account;
             assert_eq!(
-                Err(StreamError::EmptySupply.into()),
+                Err(StreamTokenError::EmptySupply.into()),
                 accounts.initialize_swap()
             );
             accounts.token_account = old_account;
@@ -1382,14 +1524,14 @@ mod tests {
             // non-empty pool token account
             accounts.pool_tokenccount = pool_tokenccount;
             assert_eq!(
-                Err(StreamError::InvalidSupply.into()),
+                Err(StreamTokenError::InvalidSupply.into()),
                 accounts.initialize_swap()
             );
 
             // pool tokens already in circulation
             accounts.pool_tokenccount = empty_pool_tokenccount;
             assert_eq!(
-                Err(StreamError::InvalidSupply.into()),
+                Err(StreamTokenError::InvalidSupply.into()),
                 accounts.initialize_swap()
             );
 
@@ -1410,7 +1552,7 @@ mod tests {
             let old_account = accounts.stream_fee_account;
             accounts.stream_fee_account = stream_fee_account;
             assert_eq!(
-                Err(StreamError::IncorrectPoolMint.into()),
+                Err(StreamTokenError::IncorrectPoolMint.into()),
                 accounts.initialize_swap()
             );
             accounts.stream_fee_account = old_account;
@@ -1436,7 +1578,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                Err(StreamError::InvalidDelegate.into()),
+                Err(StreamTokenError::InvalidDelegate.into()),
                 accounts.initialize_swap()
             );
 
@@ -1470,7 +1612,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                Err(StreamError::InvalidCloseAuthority.into()),
+                Err(StreamTokenError::InvalidCloseAuthority.into()),
                 accounts.initialize_swap()
             );
 
@@ -1494,7 +1636,7 @@ mod tests {
         {
             let wrong_program_id = Pubkey::new_unique();
             assert_eq!(
-                Err(StreamError::IncorrectTokenProgramId.into()),
+                Err(StreamTokenError::IncorrectTokenProgramId.into()),
                 do_process_instruction(
                     initialize(
                         &SWAP_PROGRAM_ID,
@@ -1536,7 +1678,7 @@ mod tests {
         // create again
         {
             assert_eq!(
-                Err(StreamError::AlreadyInUse.into()),
+                Err(StreamTokenError::AlreadyInUse.into()),
                 accounts.initialize_swap()
             );
         }
@@ -1592,502 +1734,6 @@ mod tests {
         }
 
         accounts.initialize_swap().unwrap();
-    
-    //     // wrong owner for swap account
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         let old_swap_account = accounts.swap_account;
-    //         let mut wrong_swap_account = old_swap_account.clone();
-    //         wrong_swap_account.owner = spl_token::id();
-    //         accounts.swap_account = wrong_swap_account;
-    //         assert_eq!(
-    //             Err(ProgramError::IncorrectProgramId),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-    //         accounts.swap_account = old_swap_account;
-    //     }
-
-    //     // wrong nonce for authority_key
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         let old_authority = accounts.authority_key;
-    //         let (bad_authority_key, _nonce) = Pubkey::find_program_address(
-    //             &[&accounts.swap_key.to_bytes()[..]],
-    //             &spl_token::id(),
-    //         );
-    //         accounts.authority_key = bad_authority_key;
-    //         assert_eq!(
-    //             Err(StreamError::InvalidProgramAddress.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-    //         accounts.authority_key = old_authority;
-    //     }
-
-    //     // not enough token A
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &depositor_key,
-    //             deposit_a / 2,
-    //             deposit_b,
-    //             0,
-    //         );
-    //         assert_eq!(
-    //             Err(TokenError::InsufficientFunds.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-    //     }
-
-    //     // not enough token B
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &depositor_key,
-    //             deposit_a,
-    //             deposit_b / 2,
-    //             0,
-    //         );
-    //         assert_eq!(
-    //             Err(TokenError::InsufficientFunds.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-    //     }
-
-    //     // wrong swap token accounts
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         assert_eq!(
-    //             Err(TokenError::MintMismatch.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-    //     }
-
-    //     // wrong pool token account
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             _pool_key,
-    //             mut _pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         let (
-    //             wrong_token_key,
-    //             mut wrong_tokenccount,
-    //             _token_b_key,
-    //             mut _token_b_account,
-    //             _pool_key,
-    //             mut _pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         assert_eq!(
-    //             Err(TokenError::MintMismatch.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &wrong_token_key,
-    //                 &mut wrong_tokenccount,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-    //     }
-
-    //     // no approval
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         let user_transfer_authority_key = Pubkey::new_unique();
-    //         assert_eq!(
-    //             Err(TokenError::OwnerMismatch.into()),
-    //             do_process_instruction(
-    //                 deposit_token(
-    //                     &SWAP_PROGRAM_ID,
-    //                     &spl_token::id(),
-    //                     &accounts.swap_key,
-    //                     &accounts.authority_key,
-    //                     &user_transfer_authority_key,
-    //                     &token_key,
-    //                     &token_b_key,
-    //                     &accounts.token_key,
-    //                     &accounts.token_b_key,
-    //                     &accounts.stream_token_mint_key,
-    //                     &pool_key,
-    //                     DepositToken {
-    //                         tokenamount: pool_amount.try_into().unwrap(),
-    //                         maximum_token_amount: deposit_a,
-    //                         maximum_token_b_amount: deposit_b,
-    //                     },
-    //                 )
-    //                 .unwrap(),
-    //                 vec![
-    //                     &mut accounts.swap_account,
-    //                     &mut Account::default(),
-    //                     &mut Account::default(),
-    //                     &mut token_account,
-    //                     &mut token_b_account,
-    //                     &mut accounts.token_account,
-    //                     &mut accounts.token_b_account,
-    //                     &mut accounts.stream_token_mint_account,
-    //                     &mut pool_account,
-    //                     &mut Account::default(),
-    //                 ],
-    //             )
-    //         );
-    //     }
-
-    //     // wrong token program id
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         let wrong_key = Pubkey::new_unique();
-    //         assert_eq!(
-    //             Err(StreamError::IncorrectTokenProgramId.into()),
-    //             do_process_instruction(
-    //                 deposit_token(
-    //                     &SWAP_PROGRAM_ID,
-    //                     &wrong_key,
-    //                     &accounts.swap_key,
-    //                     &accounts.authority_key,
-    //                     &accounts.authority_key,
-    //                     &token_key,
-    //                     &token_b_key,
-    //                     &accounts.token_key,
-    //                     &accounts.token_b_key,
-    //                     &accounts.stream_token_mint_key,
-    //                     &pool_key,
-    //                     DepositToken {
-    //                         tokenamount: pool_amount.try_into().unwrap(),
-    //                         maximum_token_amount: deposit_a,
-    //                         maximum_token_b_amount: deposit_b,
-    //                     },
-    //                 )
-    //                 .unwrap(),
-    //                 vec![
-    //                     &mut accounts.swap_account,
-    //                     &mut Account::default(),
-    //                     &mut Account::default(),
-    //                     &mut token_account,
-    //                     &mut token_b_account,
-    //                     &mut accounts.token_account,
-    //                     &mut accounts.token_b_account,
-    //                     &mut accounts.stream_token_mint_account,
-    //                     &mut pool_account,
-    //                     &mut Account::default(),
-    //                 ],
-    //             )
-    //         );
-    //     }
-
-    //     // wrong swap token accounts
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-
-    //         let old_a_key = accounts.token_key;
-    //         let old_a_account = accounts.token_account;
-
-    //         accounts.token_key = token_key;
-    //         accounts.token_account = token_account.clone();
-
-    //         // wrong swap token a account
-    //         assert_eq!(
-    //             Err(StreamError::IncorrectSwapAccount.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-
-    //         accounts.token_key = old_a_key;
-    //         accounts.token_account = old_a_account;
-
-    //         let old_b_key = accounts.token_b_key;
-    //         let old_b_account = accounts.token_b_account;
-
-    //         accounts.token_b_key = token_b_key;
-    //         accounts.token_b_account = token_b_account.clone();
-
-    //         // wrong swap token b account
-    //         assert_eq!(
-    //             Err(StreamError::IncorrectSwapAccount.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-
-    //         accounts.token_b_key = old_b_key;
-    //         accounts.token_b_account = old_b_account;
-    //     }
-
-    //     // wrong mint
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         let (stream_token_mint_key, stream_token_mint_account) =
-    //             create_mint(&spl_token::id(), &accounts.authority_key, None);
-    //         let old_pool_key = accounts.stream_token_mint_key;
-    //         let old_pool_account = accounts.stream_token_mint_account;
-    //         accounts.stream_token_mint_key = stream_token_mint_key;
-    //         accounts.stream_token_mint_account = stream_token_mint_account;
-
-    //         assert_eq!(
-    //             Err(StreamError::IncorrectPoolMint.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-
-    //         accounts.stream_token_mint_key = old_pool_key;
-    //         accounts.stream_token_mint_account = old_pool_account;
-    //     }
-
-    //     // deposit 1 pool token fails beacuse it equates to 0 swap tokens
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         assert_eq!(
-    //             Err(StreamError::ZeroTradingTokens.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 1,
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-    //     }
-
-    //     // slippage exceeded
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         // maximum A amount in too low
-    //         assert_eq!(
-    //             Err(StreamError::ExceededSlippage.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a / 10,
-    //                 deposit_b,
-    //             )
-    //         );
-    //         // maximum B amount in too low
-    //         assert_eq!(
-    //             Err(StreamError::ExceededSlippage.into()),
-    //             accounts.deposit_token(
-    //                 &depositor_key,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b / 10,
-    //             )
-    //         );
-    //     }
-
-    //     // invalid input: can't use swap pool tokens as source
-    //     {
-    //         let (
-    //             _token_key,
-    //             _token_account,
-    //             _token_b_key,
-    //             _token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &depositor_key, deposit_a, deposit_b, 0);
-    //         let swap_token_key = accounts.token_key;
-    //         let mut swap_token_account = accounts.get_tokenccount(&swap_token_key).clone();
-    //         let swap_token_b_key = accounts.token_b_key;
-    //         let mut swap_token_b_account = accounts.get_tokenccount(&swap_token_b_key).clone();
-    //         let authority_key = accounts.authority_key;
-    //         assert_eq!(
-    //             Err(StreamError::InvalidInput.into()),
-    //             accounts.deposit_token(
-    //                 &authority_key,
-    //                 &swap_token_key,
-    //                 &mut swap_token_account,
-    //                 &swap_token_b_key,
-    //                 &mut swap_token_b_account,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 pool_amount.try_into().unwrap(),
-    //                 deposit_a,
-    //                 deposit_b,
-    //             )
-    //         );
-    //     }
 
         // correctly deposit
         {
@@ -2163,600 +1809,6 @@ mod tests {
         }
 
         accounts.initialize_swap().unwrap();
-    
-    //     // wrong owner for swap account
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &withdrawer_key, initial_a, initial_b, 0);
-    //         let old_swap_account = accounts.swap_account;
-    //         let mut wrong_swap_account = old_swap_account.clone();
-    //         wrong_swap_account.owner = spl_token::id();
-    //         accounts.swap_account = wrong_swap_account;
-    //         assert_eq!(
-    //             Err(ProgramError::IncorrectProgramId),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-    //         accounts.swap_account = old_swap_account;
-    //     }
-
-    //     // wrong nonce for authority_key
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &withdrawer_key, initial_a, initial_b, 0);
-    //         let old_authority = accounts.authority_key;
-    //         let (bad_authority_key, _nonce) = Pubkey::find_program_address(
-    //             &[&accounts.swap_key.to_bytes()[..]],
-    //             &spl_token::id(),
-    //         );
-    //         accounts.authority_key = bad_authority_key;
-    //         assert_eq!(
-    //             Err(StreamError::InvalidProgramAddress.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-    //         accounts.authority_key = old_authority;
-    //     }
-
-    //     // not enough pool tokens
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             to_u64(withdraw_amount).unwrap() / 2u64,
-    //         );
-    //         assert_eq!(
-    //             Err(TokenError::InsufficientFunds.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount / 2,
-    //                 minimum_token_b_amount / 2,
-    //             )
-    //         );
-    //     }
-
-    //     // wrong token a / b accounts
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             withdraw_amount.try_into().unwrap(),
-    //         );
-    //         assert_eq!(
-    //             Err(TokenError::MintMismatch.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-    //     }
-
-    //     // wrong pool token account
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             _pool_key,
-    //             _pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             withdraw_amount.try_into().unwrap(),
-    //         );
-    //         let (
-    //             wrong_token_key,
-    //             mut wrong_token_account,
-    //             _token_b_key,
-    //             _token_b_account,
-    //             _pool_key,
-    //             _pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             withdraw_amount.try_into().unwrap(),
-    //             initial_b,
-    //             withdraw_amount.try_into().unwrap(),
-    //         );
-    //         assert_eq!(
-    //             Err(TokenError::MintMismatch.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &wrong_token_key,
-    //                 &mut wrong_token_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-    //     }
-
-    //     // wrong pool fee account
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             wrong_pool_key,
-    //             wrong_pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             withdraw_amount.try_into().unwrap(),
-    //         );
-    //         let (
-    //             _token_key,
-    //             _token_account,
-    //             _token_b_key,
-    //             _token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             withdraw_amount.try_into().unwrap(),
-    //         );
-    //         let old_stream_fee_account = accounts.stream_fee_account;
-    //         let old_pool_fee_key = accounts.pool_fee_key;
-    //         accounts.stream_fee_account = wrong_pool_account;
-    //         accounts.pool_fee_key = wrong_pool_key;
-    //         assert_eq!(
-    //             Err(StreamError::IncorrectFeeAccount.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             ),
-    //         );
-    //         accounts.stream_fee_account = old_stream_fee_account;
-    //         accounts.pool_fee_key = old_pool_fee_key;
-    //     }
-
-    //     // no approval
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             0,
-    //             0,
-    //             withdraw_amount.try_into().unwrap(),
-    //         );
-    //         let user_transfer_authority_key = Pubkey::new_unique();
-    //         assert_eq!(
-    //             Err(TokenError::OwnerMismatch.into()),
-    //             do_process_instruction(
-    //                 withdraw_token(
-    //                     &SWAP_PROGRAM_ID,
-    //                     &spl_token::id(),
-    //                     &accounts.swap_key,
-    //                     &accounts.authority_key,
-    //                     &user_transfer_authority_key,
-    //                     &accounts.stream_token_mint_key,
-    //                     &accounts.pool_fee_key,
-    //                     &pool_key,
-    //                     &accounts.token_key,
-    //                     &accounts.token_b_key,
-    //                     &token_key,
-    //                     &token_b_key,
-    //                     WithdrawToken {
-    //                         tokenamount: withdraw_amount.try_into().unwrap(),
-    //                         minimum_token_amount,
-    //                         minimum_token_b_amount,
-    //                     }
-    //                 )
-    //                 .unwrap(),
-    //                 vec![
-    //                     &mut accounts.swap_account,
-    //                     &mut Account::default(),
-    //                     &mut Account::default(),
-    //                     &mut accounts.stream_token_mint_account,
-    //                     &mut pool_account,
-    //                     &mut accounts.token_account,
-    //                     &mut accounts.token_b_account,
-    //                     &mut token_account,
-    //                     &mut token_b_account,
-    //                     &mut accounts.stream_fee_account,
-    //                     &mut Account::default(),
-    //                 ],
-    //             )
-    //         );
-    //     }
-
-    //     // wrong token program id
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             withdraw_amount.try_into().unwrap(),
-    //         );
-    //         let wrong_key = Pubkey::new_unique();
-    //         assert_eq!(
-    //             Err(StreamError::IncorrectTokenProgramId.into()),
-    //             do_process_instruction(
-    //                 withdraw_token(
-    //                     &SWAP_PROGRAM_ID,
-    //                     &wrong_key,
-    //                     &accounts.swap_key,
-    //                     &accounts.authority_key,
-    //                     &accounts.authority_key,
-    //                     &accounts.stream_token_mint_key,
-    //                     &accounts.pool_fee_key,
-    //                     &pool_key,
-    //                     &accounts.token_key,
-    //                     &accounts.token_b_key,
-    //                     &token_key,
-    //                     &token_b_key,
-    //                     WithdrawToken {
-    //                         tokenamount: withdraw_amount.try_into().unwrap(),
-    //                         minimum_token_amount,
-    //                         minimum_token_b_amount,
-    //                     },
-    //                 )
-    //                 .unwrap(),
-    //                 vec![
-    //                     &mut accounts.swap_account,
-    //                     &mut Account::default(),
-    //                     &mut Account::default(),
-    //                     &mut accounts.stream_token_mint_account,
-    //                     &mut pool_account,
-    //                     &mut accounts.token_account,
-    //                     &mut accounts.token_b_account,
-    //                     &mut token_account,
-    //                     &mut token_b_account,
-    //                     &mut accounts.stream_fee_account,
-    //                     &mut Account::default(),
-    //                 ],
-    //             )
-    //         );
-    //     }
-
-    //     // wrong swap token accounts
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             initial_pool.try_into().unwrap(),
-    //         );
-
-    //         let old_a_key = accounts.token_key;
-    //         let old_a_account = accounts.token_account;
-
-    //         accounts.token_key = token_key;
-    //         accounts.token_account = token_account.clone();
-
-    //         // wrong swap token a account
-    //         assert_eq!(
-    //             Err(StreamError::IncorrectSwapAccount.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-
-    //         accounts.token_key = old_a_key;
-    //         accounts.token_account = old_a_account;
-
-    //         let old_b_key = accounts.token_b_key;
-    //         let old_b_account = accounts.token_b_account;
-
-    //         accounts.token_b_key = token_b_key;
-    //         accounts.token_b_account = token_b_account.clone();
-
-    //         // wrong swap token b account
-    //         assert_eq!(
-    //             Err(StreamError::IncorrectSwapAccount.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-
-    //         accounts.token_b_key = old_b_key;
-    //         accounts.token_b_account = old_b_account;
-    //     }
-
-    //     // wrong mint
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             initial_pool.try_into().unwrap(),
-    //         );
-    //         let (stream_token_mint_key, stream_token_mint_account) =
-    //             create_mint(&spl_token::id(), &accounts.authority_key, None);
-    //         let old_pool_key = accounts.stream_token_mint_key;
-    //         let old_pool_account = accounts.stream_token_mint_account;
-    //         accounts.stream_token_mint_key = stream_token_mint_key;
-    //         accounts.stream_token_mint_account = stream_token_mint_account;
-
-    //         assert_eq!(
-    //             Err(StreamError::IncorrectPoolMint.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-
-    //         accounts.stream_token_mint_key = old_pool_key;
-    //         accounts.stream_token_mint_account = old_pool_account;
-    //     }
-
-    //     // withdrawing 1 pool token fails because it equates to 0 output tokens
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             initial_pool.try_into().unwrap(),
-    //         );
-    //         assert_eq!(
-    //             Err(StreamError::ZeroTradingTokens.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 1,
-    //                 0,
-    //                 0,
-    //             )
-    //         );
-    //     }
-
-    //     // slippage exceeded
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             initial_pool.try_into().unwrap(),
-    //         );
-    //         // minimum A amount out too high
-    //         assert_eq!(
-    //             Err(StreamError::ExceededSlippage.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount * 10,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-    //         // minimum B amount out too high
-    //         assert_eq!(
-    //             Err(StreamError::ExceededSlippage.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount * 10,
-    //             )
-    //         );
-    //     }
-
-    //     // invalid input: can't use swap pool tokens as destination
-    //     {
-    //         let (
-    //             token_key,
-    //             mut token_account,
-    //             token_b_key,
-    //             mut token_b_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &withdrawer_key,
-    //             initial_a,
-    //             initial_b,
-    //             initial_pool.try_into().unwrap(),
-    //         );
-    //         let swap_token_key = accounts.token_key;
-    //         let mut swap_token_account = accounts.get_tokenccount(&swap_token_key).clone();
-    //         assert_eq!(
-    //             Err(StreamError::InvalidInput.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &swap_token_key,
-    //                 &mut swap_token_account,
-    //                 &token_b_key,
-    //                 &mut token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-    //         let swap_token_b_key = accounts.token_b_key;
-    //         let mut swap_token_b_account = accounts.get_tokenccount(&swap_token_b_key).clone();
-    //         assert_eq!(
-    //             Err(StreamError::InvalidInput.into()),
-    //             accounts.withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 &swap_token_b_key,
-    //                 &mut swap_token_b_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //                 minimum_token_amount,
-    //                 minimum_token_b_amount,
-    //             )
-    //         );
-    //     }
 
         // correct withdrawal
         {
@@ -2807,40 +1859,88 @@ mod tests {
             );
         }
     }
-        // correct withdrawal from fee account
+
+    // #[test]
+    // fn test_start_stream() {
+    //     let user_key = Pubkey::new_unique();
+
+    //     let sender_key = Pubkey::new_unique();
+    //     let receiver_key = Pubkey::new_unique();
+    //     let lamports = 10000000000u64;
+    //     let agreement_account_size = 1000;
+    //     let sender_agreement_account_key = Pubkey::new_unique();
+    //     let receiver_agreement_account_key = Pubkey::new_unique();
+
+    //     let initial_a = 100;
+    //     let initial_pool =  1000;
+    //     let withdraw_amount = 50;
+
+
+
+
+    //     let mut accounts =
+    //         SwapAccountInfo::new(&user_key, initial_a);
+
+    //     accounts.initialize_swap().unwrap();
+
+    //     // correct withdrawal
     //     {
     //         let (
-    //             token_key,
-    //             mut token_account,
-    //             _pool_key,
-    //             mut _pool_account,
-    //         ) = accounts.setup_tokenccounts(&user_key, &withdrawer_key, 0, token_amount);
+    //             sender_token_key,
+    //             mut sender_token_account,
+    //             pool_key,
+    //             mut pool_account,
+    //         ) = accounts.setup_tokenccounts(
+    //             &user_key,
+    //             &sender_key,
+    //             initial_a,
+    //             initial_pool.try_into().unwrap(),
+    //         );
 
-    //         let pool_fee_key = accounts.pool_fee_key;
-    //         let mut stream_fee_account = accounts.stream_fee_account.clone();
-    //         let fee_account = spl_token::state::Account::unpack(&stream_fee_account.data).unwrap();
-    //         let pool_fee_amount = fee_account.amount;
+    //         let (
+    //             receiver_token_key,
+    //             mut receiver_token_account,
+    //             pool_key,
+    //             mut pool_account,
+    //         ) = accounts.setup_tokenccounts(
+    //             &user_key,
+    //             &receiver_key,
+    //             initial_a,
+    //             initial_pool.try_into().unwrap(),
+    //         );
 
     //         accounts
     //             .withdraw_token(
-    //                 &user_key,
-    //                 &pool_fee_key,
-    //                 &mut stream_fee_account,
+    //                 &withdrawer_key,
+    //                 &pool_key,
+    //                 &mut pool_account,
     //                 &token_key,
     //                 &mut token_account,
-    //                 token_amount,
+    //                 withdraw_amount.try_into().unwrap(),
     //             )
     //             .unwrap();
 
-    //         let swap_token =
+    //         let token =
     //             spl_token::state::Account::unpack(&accounts.token_account.data).unwrap();
+
     //         let stream_token_mint =
     //             spl_token::state::Mint::unpack(&accounts.stream_token_mint_account.data).unwrap();
+
+    //         assert_eq!(
+    //             token.amount,
+    //             withdraw_amount
+    //         );
 
     //         let token = spl_token::state::Account::unpack(&token_account.data).unwrap();
     //         assert_eq!(
     //             token.amount,
-    //             TryInto::<u64>::try_into(token_amount).unwrap()
+    //             initial_a + withdraw_amount
+    //         );
+
+    //         let pool_account = spl_token::state::Account::unpack(&pool_account.data).unwrap();
+    //         assert_eq!(
+    //             pool_account.amount,
+    //             initial_pool - withdraw_amount
     //         );
     //     }
     // }

@@ -2,7 +2,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use crate::error::StreamError;
+use crate::error::StreamTokenError;
 use solana_program::{
     instruction::{AccountMeta, Instruction},
     program_error::ProgramError,
@@ -43,15 +43,24 @@ pub struct WithdrawToken {
     pub tokenamount: u64,
 }
 
-/// WithdrawToken instruction data
+/// StartStream instruction data
 #[cfg_attr(feature = "fuzz", derive(Arbitrary))]
 #[repr(C)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct StartStream {
     /// Amount of pool tokens to burn. User receives an output of token a
     /// and b based on the percentage of the pool tokens that are returned.
-    pub tokenamount: u64,
+    pub flow_rate: u64,
 }
+
+/// StartStream instruction data
+#[cfg_attr(feature = "fuzz", derive(Arbitrary))]
+#[repr(C)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StopStream {
+
+}
+
 /// Instructions supported by the token swap program.
 #[repr(C)]
 #[derive(Debug, PartialEq)]
@@ -105,15 +114,18 @@ pub enum SwapInstruction {
 
     ///  Start streaming a selected token
     StartStream(StartStream),
+
+    ///  Stop streaming a selected token
+    StopStream(StopStream),
 }
 
 impl SwapInstruction {
     /// Unpacks a byte buffer into a [SwapInstruction](enum.SwapInstruction.html).
     pub fn unpack(input: &[u8]) -> Result<Self, ProgramError> {
-        let (&tag, rest) = input.split_first().ok_or(StreamError::InvalidInstruction)?;
+        let (&tag, rest) = input.split_first().ok_or(StreamTokenError::InvalidInstruction)?;
         Ok(match tag {
             0 => {
-                let (&nonce, rest) = rest.split_first().ok_or(StreamError::InvalidInstruction)?;
+                let (&nonce, rest) = rest.split_first().ok_or(StreamTokenError::InvalidInstruction)?;
                 Self::Initialize(Initialize {
                     nonce
                 })
@@ -131,12 +143,16 @@ impl SwapInstruction {
                 })
             }
             3 => {
-                let (tokenamount, rest) = Self::unpack_u64(rest)?;
+                let (flow_rate, rest) = Self::unpack_u64(rest)?;
                 Self::StartStream(StartStream {
-                    tokenamount,
+                    flow_rate,
                 })
             }
-            _ => return Err(StreamError::InvalidInstruction.into()),
+            4 => {
+                let (flow_rate, rest) = Self::unpack_u64(rest)?;
+                Self::StopStream(StopStream{})
+            }
+            _ => return Err(StreamTokenError::InvalidInstruction.into()),
         })
     }
 
@@ -147,10 +163,10 @@ impl SwapInstruction {
                 .get(..8)
                 .and_then(|slice| slice.try_into().ok())
                 .map(u64::from_le_bytes)
-                .ok_or(StreamError::InvalidInstruction)?;
+                .ok_or(StreamTokenError::InvalidInstruction)?;
             Ok((amount, rest))
         } else {
-            Err(StreamError::InvalidInstruction.into())
+            Err(StreamTokenError::InvalidInstruction.into())
         }
     }
 
@@ -177,10 +193,14 @@ impl SwapInstruction {
                 buf.extend_from_slice(&tokenamount.to_le_bytes());
             }
             Self::StartStream(StartStream {
-                tokenamount,
+                flow_rate,
             }) => {
                 buf.push(3);
-                buf.extend_from_slice(&tokenamount.to_le_bytes());
+                buf.extend_from_slice(&flow_rate.to_le_bytes());
+            }
+            Self::StopStream(StopStream {
+            }) => {
+                buf.push(4);
             }
         }
         buf
@@ -296,10 +316,10 @@ pub fn start_stream(
     stream_token_info_pubkey: &Pubkey,
     authority_pubkey: &Pubkey,
     user_transfer_authority_pubkey: &Pubkey,
-    deposit_token_pubkey: &Pubkey,
-    stream_token_pubkey: &Pubkey,
-    stream_token_mint_pubkey: &Pubkey,
-    receiver_pubkey: &Pubkey,
+    user_stream_token_pubkey: &Pubkey,
+    user_stream_agreements_pubkey: &Pubkey,
+    receiver_stream_token_pubkey: &Pubkey,
+    receiver_stream_agreements_pubkey: &Pubkey,
     instruction: StartStream,
 ) -> Result<Instruction, ProgramError> {
     let data = SwapInstruction::StartStream(instruction).pack();
@@ -308,10 +328,43 @@ pub fn start_stream(
         AccountMeta::new_readonly(*stream_token_info_pubkey, false),
         AccountMeta::new_readonly(*authority_pubkey, false),
         AccountMeta::new_readonly(*user_transfer_authority_pubkey, true),
-        AccountMeta::new(*deposit_token_pubkey, false),
-        AccountMeta::new(*stream_token_pubkey, false),
-        AccountMeta::new(*stream_token_mint_pubkey, false),
-        AccountMeta::new(*receiver_pubkey, false),
+        AccountMeta::new(*user_stream_token_pubkey, false),
+        AccountMeta::new(*user_stream_agreements_pubkey, false),
+        AccountMeta::new(*receiver_stream_token_pubkey, false),
+        AccountMeta::new(*receiver_stream_agreements_pubkey, false),
+        AccountMeta::new_readonly(*token_program_id, false),
+    ];
+
+    Ok(Instruction {
+        program_id: *program_id,
+        accounts,
+        data,
+    })
+}
+
+/// Fn to create stop stream instruction
+pub fn stop_stream(
+    program_id: &Pubkey,
+    token_program_id: &Pubkey,
+    stream_token_info_pubkey: &Pubkey,
+    authority_pubkey: &Pubkey,
+    user_transfer_authority_pubkey: &Pubkey,
+    user_stream_token_pubkey: &Pubkey,
+    user_stream_agreements_pubkey: &Pubkey,
+    receiver_stream_token_pubkey: &Pubkey,
+    receiver_stream_agreements_pubkey: &Pubkey,
+    instruction: StopStream,
+) -> Result<Instruction, ProgramError> {
+    let data = SwapInstruction::StopStream(instruction).pack();
+
+    let accounts = vec![
+        AccountMeta::new_readonly(*stream_token_info_pubkey, false),
+        AccountMeta::new_readonly(*authority_pubkey, false),
+        AccountMeta::new_readonly(*user_transfer_authority_pubkey, true),
+        AccountMeta::new(*user_stream_token_pubkey, false),
+        AccountMeta::new(*user_stream_agreements_pubkey, false),
+        AccountMeta::new(*receiver_stream_token_pubkey, false),
+        AccountMeta::new(*receiver_stream_agreements_pubkey, false),
         AccountMeta::new_readonly(*token_program_id, false),
     ];
 
@@ -371,13 +424,23 @@ mod tests {
 
     #[test]
     fn pack_start_stream() {
-        let tokenamount: u64 = 1212438012089;
+        let flow_rate: u64 = 1212438012089;
         let check = SwapInstruction::StartStream(StartStream {
-            tokenamount,
+            flow_rate,
         });
         let packed = check.pack();
         let mut expect = vec![3];
-        expect.extend_from_slice(&tokenamount.to_le_bytes());
+        expect.extend_from_slice(&flow_rate.to_le_bytes());
+        assert_eq!(packed, expect);
+        let unpacked = SwapInstruction::unpack(&expect).unwrap();
+        assert_eq!(unpacked, check);
+    }
+
+    fn pack_stop_stream() {
+        let check = SwapInstruction::StopStream(StopStream {
+        });
+        let packed = check.pack();
+        let mut expect = vec![4];
         assert_eq!(packed, expect);
         let unpacked = SwapInstruction::unpack(&expect).unwrap();
         assert_eq!(unpacked, check);
