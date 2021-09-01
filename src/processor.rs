@@ -10,7 +10,7 @@ use crate::{
     },
     state::{StreamState, StreamV1, StreamVersion, 
         UserStreamInfo, BilateralStreamAgreement, UserStreamBalance,
-        AddBilateralStreamParams, StreamAgreement},
+        AddBilateralStreamParams, RemoveBilateralStreamParams, StreamAgreement},
 };
 use num_traits::FromPrimitive;
 use solana_program::{
@@ -585,35 +585,33 @@ impl Processor {
             if !user_stream_info.is_initialized {
                 user_stream_info = UserStreamInfo::new(*stream_token_info.key)
             }
-            // let agreementInfo = BilateralStreamAgreement {
-            //     flow_rate: flow_rate,
-            //     sender: *user_stream_token_account.key,
-            //     receiver: *receiver_stream_token_account.key,
-            // };
+            let agreementInfo = BilateralStreamAgreement {
+                flow_rate: 0u64,
+                sender: *user_stream_token_account.key,
+                receiver: *receiver_stream_token_account.key,
+            };
 
-            // let mut add_stream_params_user = AddBilateralStreamParams{
-            //     user_stream_info: user_stream_info,
-            //     sender: *user_stream_token_account.key,
-            //     receiver: *receiver_stream_token_account.key,
-            //     is_user_sender: true,
-            //     flow_rate: flow_rate,
-            //     now:now,
-            // };
+            let mut add_stream_params_user = RemoveBilateralStreamParams{
+                user_stream_info: user_stream_info,
+                sender: *user_stream_token_account.key,
+                receiver: *receiver_stream_token_account.key,
+                is_user_sender: true,
+                now:now,
+            };
 
-            // let mut add_stream_params_receiver = AddBilateralStreamParams{
-            //     user_stream_info: receiver_stream_info,
-            //     sender: *user_stream_token_account.key,
-            //     receiver: *receiver_stream_token_account.key,
-            //     is_user_sender: false,
-            //     flow_rate: flow_rate,
-            //     now:now,
-            // };
+            let mut add_stream_params_receiver = RemoveBilateralStreamParams{
+                user_stream_info: receiver_stream_info,
+                sender: *user_stream_token_account.key,
+                receiver: *receiver_stream_token_account.key,
+                is_user_sender: false,
+                now:now,
+            };
 
-            // let user_stream_info_updated = agreementInfo.add_stream(add_stream_params_user)?;
-            // let receiver_stream_info_updated = agreementInfo.add_stream(add_stream_params_receiver)?;
+            let user_stream_info_updated = agreementInfo.remove_stream(add_stream_params_user)?;
+            let receiver_stream_info_updated = agreementInfo.remove_stream(add_stream_params_receiver)?;
 
-            // UserStreamInfo::pack(user_stream_info_updated, &mut user_stream_agreements_account.data.borrow_mut())?;
-            // UserStreamInfo::pack(receiver_stream_info_updated, &mut receiver_stream_agreements_account.data.borrow_mut())?;
+            UserStreamInfo::pack(user_stream_info_updated, &mut user_stream_agreements_account.data.borrow_mut())?;
+            UserStreamInfo::pack(receiver_stream_info_updated, &mut receiver_stream_agreements_account.data.borrow_mut())?;
 
             Ok(())
         }
