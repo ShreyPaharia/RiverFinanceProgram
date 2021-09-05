@@ -16,3 +16,7 @@
 - Implement integrations with multiple lending markets to generate yield on deposit tokens.
 - Create SDKs to make it easy to create new river tokens and start streams.
 - Integration with other blockchains to handle deposit of their tokens but start stream on Solana.
+
+## Links
+- [Frontend Repository](https://github.com/ShreyPaharia/RiverFinance)
+- [Slides](https://drive.google.com/file/d/17VPc8cbmftIxU-LNYmyWwgHJc3FogacV/view)
