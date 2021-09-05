@@ -6,6 +6,7 @@ use solana_program::{
     program_error::ProgramError,
     program_pack::{IsInitialized, Pack, Sealed},
     pubkey::Pubkey,
+    msg
 };
 use std::{
     cmp::Ordering,
@@ -149,18 +150,23 @@ impl StreamAgreement for BilateralStreamAgreement {
         let new_flow_rate ;
         let mut flow_rate_to_remove=0u64;
         let mut index:usize=0;
+        let mut indexes_to_remove:Vec<usize> = vec![];
 
         let mut new_agreements = vec![];
 
-        new_agreements.append(agreements);
         
         for agreement in agreements.iter() {
             if sender.eq(&agreement.sender) || receiver.eq(&agreement.receiver){
-                new_agreements.remove(index);
+                indexes_to_remove.push(index);
                 flow_rate_to_remove = agreement.flow_rate;
                 break;
             }
             index=index+1;
+        };
+
+        new_agreements.append(agreements);
+        for index_to_remove in indexes_to_remove.iter() {
+            new_agreements.remove(*index_to_remove);
         };
 
         new_deposit = old_stream_balance.deposit.

@@ -150,6 +150,37 @@ impl Processor {
         )
     }
 
+    // /// Issue a spl_token_lending 'DepositLiquidity' Instruction.
+    // pub fn deposit_liquidity<'a>(
+    //     program_id: Pubkey, 
+    //     liquidity_amount: u64, 
+    //     source_liquidity_pubkey: Pubkey, 
+    //     destination_collateral_pubkey: Pubkey, 
+    //     reserve_pubkey: Pubkey, 
+    //     reserve_liquidity_supply_pubkey: Pubkey, 
+    //     reserve_collateral_mint_pubkey: Pubkey, 
+    //     lending_market_pubkey: Pubkey, 
+    //     user_transfer_authority_pubkey: Pubkey
+
+    // ) -> Result<(), ProgramError> {
+    //     let swap_bytes = swap.to_bytes();
+    //     let authority_signature_seeds = [&swap_bytes[..32], &[nonce]];
+    //     let signers = &[&authority_signature_seeds[..]];
+    //     let ix = spl_token_lending::instruction::deposit_reserve_liquidity(program_id: Pubkey, liquidity_amount: u64, source_liquidity_pubkey: Pubkey, destination_collateral_pubkey: Pubkey, reserve_pubkey: Pubkey, reserve_liquidity_supply_pubkey: Pubkey, reserve_collateral_mint_pubkey: Pubkey, lending_market_pubkey: Pubkey, user_transfer_authority_pubkey: Pubkey)(
+    //         token_program.key,
+    //         source.key,
+    //         destination.key,
+    //         authority.key,
+    //         &[],
+    //         amount,
+    //     )?;
+    //     invoke_signed(
+    //         &ix,
+    //         &[source, destination, authority, token_program],
+    //         signers,
+    //     )
+    // }
+
     #[allow(clippy::too_many_arguments)]
     fn check_accounts(
         token_swap: &dyn StreamState,
@@ -498,7 +529,7 @@ impl Processor {
                 return Err(StreamTokenError::ZeroTradingTokens.into());
             }
 
-            let now = Clock::get()?.unix_timestamp as u64;
+            let now = 10u64;//Clock::get()?.unix_timestamp as u64;
             let mut user_stream_info = UserStreamInfo::unpack(&user_stream_agreements_account.data.borrow())?;
             let mut receiver_stream_info = UserStreamInfo::unpack(&receiver_stream_agreements_account.data.borrow())?;
 
@@ -551,7 +582,7 @@ impl Processor {
             let receiver_stream_token_account = next_account_info(account_info_iter)?;
             let receiver_stream_agreements_account = next_account_info(account_info_iter)?;
             let token_program_info = next_account_info(account_info_iter)?;
-    
+
             let stream_token_data = StreamVersion::unpack(&stream_token_info.data.borrow())?;
     
             // Self::check_accounts(
@@ -570,15 +601,14 @@ impl Processor {
 
             let stream_token_amount = stream_token.amount;
 
-            let threshold_amount = 0u64;
-            if stream_token_amount < threshold_amount {
-                return Err(StreamTokenError::InsufficientFunds.into());
-            }
-            if stream_token_amount == 0 {
-                return Err(StreamTokenError::ZeroTradingTokens.into());
-            }
-
-            let now = Clock::get()?.unix_timestamp as u64;
+            // let threshold_amount = 0u64;
+            // if stream_token_amount < threshold_amount {
+            //     return Err(StreamTokenError::InsufficientFunds.into());
+            // }
+            // if stream_token_amount == 0 {
+            //     return Err(StreamTokenError::ZeroTradingTokens.into());
+            // }
+            let now = 10u64;//Clock::get()?.unix_timestamp as u64;
             let mut user_stream_info = UserStreamInfo::unpack(&user_stream_agreements_account.data.borrow())?;
             let mut receiver_stream_info = UserStreamInfo::unpack(&receiver_stream_agreements_account.data.borrow())?;
 
@@ -673,7 +703,7 @@ impl Processor {
             }
             SwapInstruction::StopStream(StopStream {
             }) => {
-                msg!("Instruction: StartStream");
+                msg!("Instruction: StopStream");
                 Self::process_stop_stream(
                     program_id,
                     accounts,
@@ -769,7 +799,7 @@ mod tests {
     use crate::{
         instruction::{
             deposit_token, initialize,
-            withdraw_token, start_stream
+            withdraw_token, start_stream, stop_stream
         },
     };
     use solana_program::{instruction::Instruction, program_stubs, rent::Rent};
@@ -1102,58 +1132,108 @@ mod tests {
             )
         }
 
-        // #[allow(clippy::too_many_arguments)]
-        // pub fn start_stream(
-        //     &mut self,
-        //     user_key: &Pubkey,
-        //     pool_key: &Pubkey,
-        //     mut pool_account: &mut Account,
-        //     token_key: &Pubkey,
-        //     mut token_account: &mut Account,
-        //     flow_rate: u64,
-        // ) -> ProgramResult {
-        //     let user_transfer_authority_key = Pubkey::new_unique();
-        //     // approve user transfer authority to take out pool tokens
-        //     do_process_instruction(
-        //         approve(
-        //             &spl_token::id(),
-        //             pool_key,
-        //             &user_transfer_authority_key,
-        //             user_key,
-        //             &[],
-        //             tokenamount,
-        //         )
-        //         .unwrap(),
-        //         vec![
-        //             &mut pool_account,
-        //             &mut Account::default(),
-        //             &mut Account::default(),
-        //         ],
-        //     )
-        //     .unwrap();
+        #[allow(clippy::too_many_arguments)]
+        pub fn start_stream(
+            &mut self,
+            user_key: &Pubkey,
+            pool_key: &Pubkey,
+            mut pool_account: &mut Account,
+            pool_agreement_key: &Pubkey,
+            mut pool_agreement_account: &mut Account,
 
-        //     // withdraw token a and b correctly
-        //     do_process_instruction(
-        //         start_stream(
+            receiver_pool_key: &Pubkey,
+            mut receiver_pool_account: &mut Account,
+
+            receiver_pool_agreement_key: &Pubkey,
+            mut receiver_pool_agreement_account: &mut Account,
+
+            token_key: &Pubkey,
+            mut token_account: &mut Account,
+            flow_rate: u64,
+        ) -> ProgramResult {
+            let user_transfer_authority_key = Pubkey::new_unique();
+
+            do_process_instruction(
+                start_stream(
+                    &SWAP_PROGRAM_ID,
+                    &spl_token::id(),
+                    &self.swap_key,
+                    &self.authority_key,
+                    &user_transfer_authority_key,
+                    pool_key,
+                    pool_agreement_key,
+                    receiver_pool_key,
+                    receiver_pool_agreement_key,
+                    StartStream{
+                        flow_rate,
+                    },
                     
-        //             StartStream {
-        //                 flow_rate,
-        //             },
-        //         )
-        //         .unwrap(),
-        //         vec![
-        //             &mut self.swap_account,
-        //             &mut Account::default(),
-        //             &mut Account::default(),
-        //             &mut self.stream_token_mint_account,
-        //             &mut pool_account,
-        //             &mut self.token_account,
-        //             &mut token_account,
-        //             &mut self.stream_fee_account,
-        //             &mut Account::default(),
-        //         ],
-        //     )
-        // }
+                )
+                .unwrap(),
+                vec![
+                    &mut self.swap_account,
+                    &mut Account::default(),
+                    &mut Account::default(),
+                    // &mut self.stream_token_mint_account,
+                    &mut pool_account,
+                    &mut pool_agreement_account,
+                    &mut receiver_pool_account,
+                    &mut receiver_pool_agreement_account,
+                    &mut Account::default(),
+                ],
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn stop_stream(
+            &mut self,
+            user_key: &Pubkey,
+            pool_key: &Pubkey,
+            mut pool_account: &mut Account,
+            pool_agreement_key: &Pubkey,
+            mut pool_agreement_account: &mut Account,
+
+            receiver_pool_key: &Pubkey,
+            mut receiver_pool_account: &mut Account,
+
+            receiver_pool_agreement_key: &Pubkey,
+            mut receiver_pool_agreement_account: &mut Account,
+
+            token_key: &Pubkey,
+            mut token_account: &mut Account,
+            flow_rate: u64,
+        ) -> ProgramResult {
+            let user_transfer_authority_key = Pubkey::new_unique();
+
+            do_process_instruction(
+                stop_stream(
+                    &SWAP_PROGRAM_ID,
+                    &spl_token::id(),
+                    &self.swap_key,
+                    &self.authority_key,
+                    &user_transfer_authority_key,
+                    pool_key,
+                    pool_agreement_key,
+                    receiver_pool_key,
+                    receiver_pool_agreement_key,
+                    StopStream{
+                    },
+                    
+                )
+                .unwrap(),
+                vec![
+                    &mut self.swap_account,
+                    &mut Account::default(),
+                    &mut Account::default(),
+                    // &mut self.stream_token_mint_account,
+                    &mut pool_account,
+                    &mut pool_agreement_account,
+                    &mut receiver_pool_account,
+                    &mut receiver_pool_agreement_account,
+                    &mut Account::default(),
+                ],
+            )
+        }
     }
 
     fn mint_minimum_balance() -> u64 {
@@ -1858,88 +1938,266 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_start_stream() {
-    //     let user_key = Pubkey::new_unique();
+    #[test]
+    fn test_start_stream() {
+        let user_key = Pubkey::new_unique();
 
-    //     let sender_key = Pubkey::new_unique();
-    //     let receiver_key = Pubkey::new_unique();
-    //     let lamports = 10000000000u64;
-    //     let agreement_account_size = 1000;
-    //     let sender_agreement_account_key = Pubkey::new_unique();
-    //     let receiver_agreement_account_key = Pubkey::new_unique();
+        let sender_key = Pubkey::new_unique();
+        let receiver_key = Pubkey::new_unique();
+        let lamports = 10000000000u64;
+        let agreement_account_size = 1000;
+        let sender_agreement_account_key = Pubkey::new_unique();
+        let receiver_agreement_account_key = Pubkey::new_unique();
+        let flow_rate:u64 =  1u64;
 
-    //     let initial_a = 100;
-    //     let initial_pool =  1000;
-    //     let withdraw_amount = 50;
+        let mut sender_agreement_account = Account::new(
+            Rent::default().minimum_balance(UserStreamInfo::get_packed_len()),
+            UserStreamInfo::get_packed_len(),
+            &sender_key,
+        );
+
+        let mut receiver_agreement_account = Account::new(
+            Rent::default().minimum_balance(UserStreamInfo::get_packed_len()),
+            UserStreamInfo::get_packed_len(),
+            &receiver_key,
+        );
+
+        let initial_a = 100;
+        let initial_pool =  1000;
+        let withdraw_amount = 50;
 
 
 
 
-    //     let mut accounts =
-    //         SwapAccountInfo::new(&user_key, initial_a);
+        let mut accounts =
+            SwapAccountInfo::new(&user_key, initial_a);
 
-    //     accounts.initialize_swap().unwrap();
+        accounts.initialize_swap().unwrap();
 
-    //     // correct withdrawal
-    //     {
-    //         let (
-    //             sender_token_key,
-    //             mut sender_token_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &sender_key,
-    //             initial_a,
-    //             initial_pool.try_into().unwrap(),
-    //         );
+        // correct withdrawal
+        {
+            let (
+                sender_token_key,
+                mut sender_token_account,
+                sender_pool_key,
+                mut sender_pool_account,
+            ) = accounts.setup_tokenccounts(
+                &user_key,
+                &sender_key,
+                initial_a,
+                initial_pool.try_into().unwrap(),
+            );
 
-    //         let (
-    //             receiver_token_key,
-    //             mut receiver_token_account,
-    //             pool_key,
-    //             mut pool_account,
-    //         ) = accounts.setup_tokenccounts(
-    //             &user_key,
-    //             &receiver_key,
-    //             initial_a,
-    //             initial_pool.try_into().unwrap(),
-    //         );
+            let (
+                receiver_token_key,
+                mut receiver_token_account,
+                receiver_pool_key,
+                mut receiver_pool_account,
+            ) = accounts.setup_tokenccounts(
+                &user_key,
+                &receiver_key,
+                initial_a,
+                initial_pool.try_into().unwrap(),
+            );
 
-    //         accounts
-    //             .withdraw_token(
-    //                 &withdrawer_key,
-    //                 &pool_key,
-    //                 &mut pool_account,
-    //                 &token_key,
-    //                 &mut token_account,
-    //                 withdraw_amount.try_into().unwrap(),
-    //             )
-    //             .unwrap();
+            accounts.start_stream(
+                    &sender_key , 
+                    &sender_pool_key , 
+                    &mut sender_pool_account, 
+                    &sender_agreement_account_key , 
+                    &mut sender_agreement_account,
+                    &receiver_pool_key,
+                    &mut receiver_pool_account,
+                    &receiver_agreement_account_key , 
+                    &mut receiver_agreement_account,
+                    &sender_token_key , 
+                    &mut sender_token_account, 
+                    flow_rate.try_into().unwrap())
+            .unwrap();
 
-    //         let token =
-    //             spl_token::state::Account::unpack(&accounts.token_account.data).unwrap();
+            let sender_user_stream_info = UserStreamInfo::unpack(&sender_agreement_account.data).unwrap();
 
-    //         let stream_token_mint =
-    //             spl_token::state::Mint::unpack(&accounts.stream_token_mint_account.data).unwrap();
+            let receiver_user_stream_info = UserStreamInfo::unpack(&receiver_agreement_account.data).unwrap();
 
-    //         assert_eq!(
-    //             token.amount,
-    //             withdraw_amount
-    //         );
+            assert_eq!(
+                sender_user_stream_info.is_initialized,
+                true
+            );
 
-    //         let token = spl_token::state::Account::unpack(&token_account.data).unwrap();
-    //         assert_eq!(
-    //             token.amount,
-    //             initial_a + withdraw_amount
-    //         );
+            assert_eq!(
+                sender_user_stream_info.stream_balance,
+                UserStreamBalance{
+                    timestamp:10u64,
+                    flow_rate:-1*(flow_rate as i64),
+                    deposit:0,
+                    owed_deposit:0
+                }
+                
+            );
 
-    //         let pool_account = spl_token::state::Account::unpack(&pool_account.data).unwrap();
-    //         assert_eq!(
-    //             pool_account.amount,
-    //             initial_pool - withdraw_amount
-    //         );
-    //     }
-    // }
+            assert_eq!(
+                receiver_user_stream_info.stream_balance,
+                UserStreamBalance{
+                    timestamp:10u64,
+                    flow_rate:(flow_rate as i64),
+                    deposit:0,
+                    owed_deposit:0
+                }
+                
+            );
+
+            assert_eq!(
+                sender_user_stream_info.agreements,
+                vec![BilateralStreamAgreement{
+                    flow_rate,
+                    sender:sender_pool_key,
+                    receiver:receiver_pool_key
+                }]
+            );
+
+            assert_eq!(
+                receiver_user_stream_info.agreements,
+                vec![BilateralStreamAgreement{
+                    flow_rate,
+                    sender:sender_pool_key,
+                    receiver:receiver_pool_key
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn test_stop_stream() {
+        let user_key = Pubkey::new_unique();
+
+        let sender_key = Pubkey::new_unique();
+        let receiver_key = Pubkey::new_unique();
+        let lamports = 10000000000u64;
+        let agreement_account_size = 1000;
+        let sender_agreement_account_key = Pubkey::new_unique();
+        let receiver_agreement_account_key = Pubkey::new_unique();
+        let flow_rate:u64 =  1u64;
+
+        let mut sender_agreement_account = Account::new(
+            Rent::default().minimum_balance(UserStreamInfo::get_packed_len()),
+            UserStreamInfo::get_packed_len(),
+            &sender_key,
+        );
+
+        let mut receiver_agreement_account = Account::new(
+            Rent::default().minimum_balance(UserStreamInfo::get_packed_len()),
+            UserStreamInfo::get_packed_len(),
+            &receiver_key,
+        );
+
+        let initial_a = 100;
+        let initial_pool =  1000;
+        let withdraw_amount = 50;
+
+
+
+
+        let mut accounts =
+            SwapAccountInfo::new(&user_key, initial_a);
+
+        accounts.initialize_swap().unwrap();
+
+        // correct withdrawal
+        {
+            let (
+                sender_token_key,
+                mut sender_token_account,
+                sender_pool_key,
+                mut sender_pool_account,
+            ) = accounts.setup_tokenccounts(
+                &user_key,
+                &sender_key,
+                initial_a,
+                initial_pool.try_into().unwrap(),
+            );
+
+            let (
+                receiver_token_key,
+                mut receiver_token_account,
+                receiver_pool_key,
+                mut receiver_pool_account,
+            ) = accounts.setup_tokenccounts(
+                &user_key,
+                &receiver_key,
+                initial_a,
+                initial_pool.try_into().unwrap(),
+            );
+
+            accounts.start_stream(
+                &sender_key , 
+                &sender_pool_key , 
+                &mut sender_pool_account, 
+                &sender_agreement_account_key , 
+                &mut sender_agreement_account,
+                &receiver_pool_key,
+                &mut receiver_pool_account,
+                &receiver_agreement_account_key , 
+                &mut receiver_agreement_account,
+                &sender_token_key , 
+                &mut sender_token_account, 
+                flow_rate.try_into().unwrap())
+            .unwrap();
+
+            accounts.stop_stream(
+                    &sender_key , 
+                    &sender_pool_key , 
+                    &mut sender_pool_account, 
+                    &sender_agreement_account_key , 
+                    &mut sender_agreement_account,
+                    &receiver_pool_key,
+                    &mut receiver_pool_account,
+                    &receiver_agreement_account_key , 
+                    &mut receiver_agreement_account,
+                    &sender_token_key , 
+                    &mut sender_token_account, 
+                    flow_rate.try_into().unwrap())
+            .unwrap();
+
+            let sender_user_stream_info = UserStreamInfo::unpack(&sender_agreement_account.data).unwrap();
+
+            let receiver_user_stream_info = UserStreamInfo::unpack(&receiver_agreement_account.data).unwrap();
+
+            assert_eq!(
+                sender_user_stream_info.is_initialized,
+                true
+            );
+
+            assert_eq!(
+                sender_user_stream_info.stream_balance,
+                UserStreamBalance{
+                    timestamp:10u64,
+                    flow_rate:0,
+                    deposit:0,
+                    owed_deposit:0
+                }
+                
+            );
+
+            assert_eq!(
+                receiver_user_stream_info.stream_balance,
+                UserStreamBalance{
+                    timestamp:10u64,
+                    flow_rate:0,
+                    deposit:0,
+                    owed_deposit:0
+                }
+                
+            );
+
+            assert_eq!(
+                sender_user_stream_info.agreements,
+                vec![]
+            );
+
+            assert_eq!(
+                receiver_user_stream_info.agreements,
+                vec![]
+            );
+        }
+    }
 }

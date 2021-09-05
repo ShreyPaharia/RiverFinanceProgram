@@ -8,6 +8,7 @@ use solana_program::{
     program_error::ProgramError,
     program_pack::Pack,
     pubkey::Pubkey,
+    msg
 };
 use std::convert::TryInto;
 use std::mem::size_of;
@@ -57,9 +58,7 @@ pub struct StartStream {
 #[cfg_attr(feature = "fuzz", derive(Arbitrary))]
 #[repr(C)]
 #[derive(Clone, Debug, PartialEq)]
-pub struct StopStream {
-
-}
+pub struct StopStream ;
 
 /// Instructions supported by the token swap program.
 #[repr(C)]
@@ -149,7 +148,6 @@ impl SwapInstruction {
                 })
             }
             4 => {
-                let (flow_rate, rest) = Self::unpack_u64(rest)?;
                 Self::StopStream(StopStream{})
             }
             _ => return Err(StreamTokenError::InvalidInstruction.into()),
@@ -198,8 +196,7 @@ impl SwapInstruction {
                 buf.push(3);
                 buf.extend_from_slice(&flow_rate.to_le_bytes());
             }
-            Self::StopStream(StopStream {
-            }) => {
+            Self::StopStream(StopStream{}) => {
                 buf.push(4);
             }
         }
@@ -435,10 +432,9 @@ mod tests {
         let unpacked = SwapInstruction::unpack(&expect).unwrap();
         assert_eq!(unpacked, check);
     }
-
+    #[test]
     fn pack_stop_stream() {
-        let check = SwapInstruction::StopStream(StopStream {
-        });
+        let check = SwapInstruction::StopStream(StopStream{});
         let packed = check.pack();
         let mut expect = vec![4];
         assert_eq!(packed, expect);
